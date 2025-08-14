@@ -49,8 +49,18 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             uc = (user_input.get(CONF_USER_CODE) or "").strip()
             if uc:
-                # Exchange user code for access token via /v1.0/token?grant_type=2
-                auth_res = await self.hass.async_add_executor_job(exchange_user_code_token_sync, api, uc)
+                # Try helper if present; otherwise fall back to direct token exchange
+                try:
+                    exchange_fn = getattr(_api(), "exchange_user_code_token_sync")
+                except Exception:
+                    exchange_fn = None
+
+                if exchange_fn:
+                    auth_res = await self.hass.async_add_executor_job(exchange_fn, api, uc)
+                else:
+                    def _token_exchange():
+                        return api.get("/v1.0/token", params={"grant_type": 2, "code": uc})
+                    auth_res = await self.hass.async_add_executor_job(_token_exchange)
                 if not auth_res or not auth_res.get("success"):
                     err_detail = None
                     if isinstance(auth_res, dict):
@@ -137,7 +147,16 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             from .api import connect_sync, exchange_user_code_token_sync, get_spec_sync, get_status_sync
             api = await self.hass.async_add_executor_job(connect_sync, endpoint, aid, sec)
             if uc:
-                await self.hass.async_add_executor_job(exchange_user_code_token_sync, api, uc)
+                try:
+                    exchange_fn = getattr(_api(), "exchange_user_code_token_sync")
+                except Exception:
+                    exchange_fn = None
+                if exchange_fn:
+                    await self.hass.async_add_executor_job(exchange_fn, api, uc)
+                else:
+                    def _token_exchange():
+                        return api.get("/v1.0/token", params={"grant_type": 2, "code": uc})
+                    await self.hass.async_add_executor_job(_token_exchange)
             self._spec = await self.hass.async_add_executor_job(get_spec_sync, api, self._cfg[CONF_DEVICE_ID])
             self._status = await self.hass.async_add_executor_job(get_status_sync, api, self._cfg[CONF_DEVICE_ID])
         except Exception:
@@ -198,7 +217,16 @@ class TuyaCloudDPOptionsFlow(config_entries.OptionsFlow):
             api = await self.hass.async_add_executor_job(connect_sync, endpoint, data[CONF_ACCESS_ID], data[CONF_ACCESS_SECRET])
             uc = (data.get(CONF_USER_CODE) or "").strip()
             if uc:
-                await self.hass.async_add_executor_job(exchange_user_code_token_sync, api, uc)
+                try:
+                    exchange_fn = getattr(_api(), "exchange_user_code_token_sync")
+                except Exception:
+                    exchange_fn = None
+                if exchange_fn:
+                    await self.hass.async_add_executor_job(exchange_fn, api, uc)
+                else:
+                    def _token_exchange():
+                        return api.get("/v1.0/token", params={"grant_type": 2, "code": uc})
+                    await self.hass.async_add_executor_job(_token_exchange)
             self._spec = await self.hass.async_add_executor_job(get_spec_sync, api, data[CONF_DEVICE_ID])
             self._status = await self.hass.async_add_executor_job(get_status_sync, api, data[CONF_DEVICE_ID])
         except Exception:
