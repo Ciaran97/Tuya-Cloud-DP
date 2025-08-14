@@ -24,34 +24,62 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Tuya SDK
+# Tuya SDK (sync)
 from tuya_iot import TuyaOpenAPI
 
+ENDPOINTS = {
+    "us": "https://openapi.tuyaus.com",
+    "eu": "https://openapi.tuyaeu.com",
+    "in": "https://openapi.tuyain.com",
+    "cn": "https://openapi.tuyacn.com",
+}
 
-async def _tuya_api(cfg):
-    api = TuyaOpenAPI(
-        f"https://openapi.tuya{cfg[CONF_REGION]}.com",
-        cfg[CONF_ACCESS_ID],
-        cfg[CONF_ACCESS_SECRET],
+async def async_added_to_hass(self):
+    # Keep entity in sync with Options changes
+    self.async_on_remove(
+        self.hass.config_entries.async_update_listener(self._on_options_update)
     )
-    # Token lifecycle handled by SDK
-    api.connect()
+
+async def _on_options_update(self, entry):
+    if entry.entry_id != self.platform.config_entry.entry_id:
+        return
+    # Refresh cfg from updated options
+    new_cfg = {**entry.data, **(entry.options or {})}
+    self.cfg = new_cfg
+    self._set_code = new_cfg.get("setpoint_code", self._set_code)
+    self._cur_code = new_cfg.get("curtemp_code", self._cur_code)
+    self._power_code = new_cfg.get("power_code", self._power_code)
+    self._mode_code = new_cfg.get("mode_code", self._mode_code)
+    await self.async_update()
+    self.async_write_ha_state()
+
+def _resolve_endpoint(cfg: dict) -> str:
+    region = (cfg.get(CONF_REGION) or "us").lower()
+    return ENDPOINTS.get(region, ENDPOINTS["us"])
+
+
+async def _tuya_api(hass, cfg):
+    """Create SDK client and connect in executor (non-blocking for HA)."""
+    endpoint = _resolve_endpoint(cfg)
+    api = TuyaOpenAPI(endpoint, cfg[CONF_ACCESS_ID], cfg[CONF_ACCESS_SECRET])
+    await hass.async_add_executor_job(api.connect)  # <— move blocking call off event loop
     return api
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     cfg = {**entry.data, **(entry.options or {})}
-    api = await _tuya_api(cfg)
-    async_add_entities([TuyaDPClimate(api, cfg)], update_before_add=True)
+    api = await _tuya_api(hass, cfg)
+    async_add_entities([TuyaDPClimate(hass, api, cfg)], update_before_add=True)
 
 
 class TuyaDPClimate(ClimateEntity):
     _attr_name = "Tuya Cloud DP Thermostat"
-    _attr_should_poll = True  # cloud polling
+    _attr_should_poll = True
     _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
 
-    def __init__(self, api: TuyaOpenAPI, cfg: dict):
+    def __init__(self, hass, api: TuyaOpenAPI, cfg: dict):
+        self.hass = hass
         self.api = api
         self.cfg = cfg
 
@@ -70,13 +98,12 @@ class TuyaDPClimate(ClimateEntity):
         self._attr_target_temperature = None
         self._attr_current_temperature = None
 
-        # Device registry entry so it appears under “Devices”
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._device_id)},
             name="Tuya Cloud DP Thermostat",
             manufacturer="Tuya",
             model=self.cfg.get("model", "WBR3-HYWE_v3.0"),
-            configuration_url=f"https://iot.tuya.com",
+            configuration_url="https://iot.tuya.com",
         )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -101,9 +128,9 @@ class TuyaDPClimate(ClimateEntity):
         self.async_write_ha_state()
 
     async def async_update(self) -> None:
+        """Poll device status via Tuya Cloud in executor."""
         try:
-            res = await asyncio.get_event_loop().run_in_executor(
-                None,
+            res = await self.hass.async_add_executor_job(
                 self.api.get,
                 f"/v1.0/iot-03/devices/{self._device_id}/status",
                 None,
@@ -128,10 +155,10 @@ class TuyaDPClimate(ClimateEntity):
             _LOGGER.warning("Tuya Cloud DP status error: %s", e)
 
     async def _send(self, commands):
+        """Send commands via Tuya Cloud in executor."""
         body = {"commands": commands}
         try:
-            res = await asyncio.get_event_loop().run_in_executor(
-                None,
+            res = await self.hass.async_add_executor_job(
                 self.api.post,
                 f"/v1.0/iot-03/devices/{self._device_id}/commands",
                 body,
