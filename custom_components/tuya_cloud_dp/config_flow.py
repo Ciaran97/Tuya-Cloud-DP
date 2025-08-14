@@ -1,4 +1,3 @@
-# custom_components/tuya_cloud_dp/config_flow.py
 from __future__ import annotations
 import logging
 import voluptuous as vol
@@ -15,7 +14,7 @@ from .const import (
     CONF_MIN_TEMP, CONF_MAX_TEMP, CONF_PRECISION, CONF_USER_CODE
 )
 from .api import (
-    resolve_endpoint, connect_sync, authorized_login_sync,
+    resolve_endpoint, connect_sync, exchange_user_code_token_sync,
     get_user_devices_sync, get_spec_sync, get_status_sync
 )
 
@@ -50,30 +49,28 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             uc = (user_input.get(CONF_USER_CODE) or "").strip()
             if uc:
-                auth_res = await self.hass.async_add_executor_job(authorized_login_sync, api, uc)
+                # Exchange user code for access token via /v1.0/token?grant_type=2
+                auth_res = await self.hass.async_add_executor_job(exchange_user_code_token_sync, api, uc)
                 if not auth_res or not auth_res.get("success"):
-    # Get some kind of readable reason from Tuya
                     err_detail = None
                     if isinstance(auth_res, dict):
                         err_detail = auth_res.get("msg") or auth_res.get("code") or str(auth_res)
                     else:
                         err_detail = str(auth_res)
-
-                    _LOGGER.warning(f"Tuya auth failed: {auth_res}")
-
+                    _LOGGER.warning(f"Tuya user-code token exchange failed: {auth_res}")
                     safe_err = "".join(c if c.isalnum() else "_" for c in (err_detail or "")).strip("_")
                     error_key = f"cannot_connect_{safe_err}" if safe_err else "cannot_connect"
-
                     return self.async_show_form(
                         step_id="user",
                         data_schema=STEP1_SCHEMA,
                         errors={"base": error_key},
                         description_placeholders={"err": err_detail or "Unknown error"}
                     )
-                token = (auth_res.get("result") or {}).get("access_token")
+                token_info = auth_res.get("result") or {}
+                token = token_info.get("access_token")
                 if token:
                     try:
-                        api.token_info = auth_res["result"]
+                        api.token_info = token_info
                     except Exception:
                         pass
                     try:
@@ -137,10 +134,10 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         endpoint, aid, sec, uc = self.hass.data[DOMAIN].get("api_seed")
         # Reconnect + (re)login to be safe
         try:
-            from .api import connect_sync, authorized_login_sync, get_spec_sync, get_status_sync
+            from .api import connect_sync, exchange_user_code_token_sync, get_spec_sync, get_status_sync
             api = await self.hass.async_add_executor_job(connect_sync, endpoint, aid, sec)
             if uc:
-                await self.hass.async_add_executor_job(authorized_login_sync, api, uc)
+                await self.hass.async_add_executor_job(exchange_user_code_token_sync, api, uc)
             self._spec = await self.hass.async_add_executor_job(get_spec_sync, api, self._cfg[CONF_DEVICE_ID])
             self._status = await self.hass.async_add_executor_job(get_status_sync, api, self._cfg[CONF_DEVICE_ID])
         except Exception:
@@ -201,7 +198,7 @@ class TuyaCloudDPOptionsFlow(config_entries.OptionsFlow):
             api = await self.hass.async_add_executor_job(connect_sync, endpoint, data[CONF_ACCESS_ID], data[CONF_ACCESS_SECRET])
             uc = (data.get(CONF_USER_CODE) or "").strip()
             if uc:
-                await self.hass.async_add_executor_job(authorized_login_sync, api, uc)
+                await self.hass.async_add_executor_job(exchange_user_code_token_sync, api, uc)
             self._spec = await self.hass.async_add_executor_job(get_spec_sync, api, data[CONF_DEVICE_ID])
             self._status = await self.hass.async_add_executor_job(get_status_sync, api, data[CONF_DEVICE_ID])
         except Exception:

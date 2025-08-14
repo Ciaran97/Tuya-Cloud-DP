@@ -62,7 +62,7 @@ async def _tuya_api(hass, cfg):
     """Create SDK client and connect in executor (non-blocking for HA)."""
     endpoint = _resolve_endpoint(cfg)
     api = TuyaOpenAPI(endpoint, cfg[CONF_ACCESS_ID], cfg[CONF_ACCESS_SECRET])
-    await hass.async_add_executor_job(api.connect)  # <— move blocking call off event loop
+    await hass.async_add_executor_job(api.connect)
     return api
 
 
