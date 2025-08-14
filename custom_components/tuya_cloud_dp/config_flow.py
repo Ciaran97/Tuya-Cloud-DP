@@ -15,6 +15,11 @@ from .cloud_api import TuyaCloudApi
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _error_schema(msg: str) -> vol.Schema:
+    # read-only-ish display of the error message
+    return STEP1_SCHEMA.extend({ vol.Optional("error_detail", default=str(msg)): str })
+
 # Minimal inputs
 CONF_ACCESS_ID = "access_id"
 CONF_ACCESS_SECRET = "access_secret"
@@ -107,22 +112,50 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         try:
             self._cfg1 = dict(user_input)
-            api = TuyaCloudApi(self.hass, user_input[CONF_REGION], user_input[CONF_ACCESS_ID], user_input[CONF_ACCESS_SECRET])
+            region_selected = user_input[CONF_REGION]
+            access_id = user_input[CONF_ACCESS_ID]
+            access_secret = user_input[CONF_ACCESS_SECRET]
+            user_code = user_input[CONF_USER_CODE].strip()
 
-            # 1) grant_type=1 (project token)
-            res = await api.grant_type_1()
-            if res != "ok":
-                return self._err_form("user", "cannot_connect", res)
+            # Try selected region first, then the other of (us, eu)
+            region_order = [region_selected] + ([r for r in ("us","eu") if r != region_selected] if region_selected in ("us","eu") else ["us","eu"])
 
-            # 2) user_code → user-bound token
-            res2 = await api.exchange_user_code(user_input[CONF_USER_CODE].strip())
-            if res2 != "ok":
-                return self._err_form("user", "cannot_connect", res2)
+            last_err = None
+            api = None
+            for region in region_order:
+                try:
+                    api = TuyaCloudApi(self.hass, region, access_id, access_secret)
+                    res = await api.grant_type_1()
+                    if res != "ok":
+                        last_err = res
+                        continue
+                    res2 = await api.exchange_user_code(user_code)
+                    if res2 != "ok":
+                        last_err = res2
+                        continue
+                    # success on this region
+                    self._cfg1[CONF_REGION] = region
+                    break
+                except Exception as e:
+                    last_err = str(e)
+                    api = None
 
-            # 3) device list
+            if api is None:
+                # Show the real reason in a field
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=_error_schema(last_err or "unknown"),
+                    errors={"base": "cannot_connect"},
+                )
+
+            # Device list
             devs = await api.list_devices()
             if not devs or not devs.get("success"):
-                return self._err_form("user", "no_devices", devs)
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=_error_schema(devs),
+                    errors={"base": "no_devices"},
+                )
 
             result = devs.get("result")
             if isinstance(result, list):
@@ -133,13 +166,21 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._devices = []
 
             if not self._devices:
-                return self._err_form("user", "no_devices", {"msg": "0 devices"})
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=_error_schema("0 devices returned"),
+                    errors={"base": "no_devices"},
+                )
 
             return await self.async_step_pick_device()
 
         except Exception as e:
             _LOGGER.exception("Config step 'user' failed: %s", e)
-            return self._err_form("user", "unknown", e)
+            return self.async_show_form(
+                step_id="user",
+                data_schema=_error_schema(e),
+                errors={"base": "unknown"},
+            )
 
     async def async_step_pick_device(self, user_input=None) -> FlowResult:
         choices: Dict[str, str] = {}

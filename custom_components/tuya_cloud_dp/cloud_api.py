@@ -69,6 +69,7 @@ class TuyaCloudApi:
         if not j.get("success"):
             return f"Error {j.get('code')}: {j.get('msg')}"
         self._token = (j.get("result") or {}).get("access_token", "")
+        _LOGGER.debug("grant_type_1 OK (endpoint=%s)", self._endpoint)
         return "ok"
 
     async def exchange_user_code(self, user_code: str) -> str:
@@ -80,11 +81,14 @@ class TuyaCloudApi:
         if not j.get("success"):
             return f"Error {j.get('code')}: {j.get('msg')}"
         self._token = (j.get("result") or {}).get("access_token", "")
+        _LOGGER.debug("exchange_user_code OK (endpoint=%s)", self._endpoint)
         return "ok"
 
     async def list_devices(self) -> Dict[str, Any]:
         """Associated user’s devices (no user_id required)."""
         r = await self._req("GET", "/v1.0/iot-01/associated-users/devices", params={"page_no": 1, "page_size": 100})
+        if not r.ok:
+            _LOGGER.warning("list_devices HTTP error %s (endpoint=%s)", r.status_code, self._endpoint)
         return r.json() if r.ok else {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}
 
     async def device_spec(self, device_id: str) -> Dict[str, Any]:
