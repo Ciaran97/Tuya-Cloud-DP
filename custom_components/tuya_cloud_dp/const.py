@@ -1,0 +1,13 @@
+DOMAIN = "tuya_cloud_dp"
+PLATFORMS = ["climate"]
+CONF_ACCESS_ID = "access_id"
+CONF_ACCESS_SECRET = "access_secret"
+CONF_REGION = "region"
+CONF_DEVICE_ID = "device_id"
+CONF_SETPOINT_CODE = "setpoint_code"
+CONF_MODE_CODE = "mode_code"
+CONF_POWER_CODE = "power_code"
+CONF_CURTEMP_CODE = "curtemp_code"
+CONF_MIN_TEMP = "min_temp"
+CONF_MAX_TEMP = "max_temp"
+CONF_PRECISION = "precision"
