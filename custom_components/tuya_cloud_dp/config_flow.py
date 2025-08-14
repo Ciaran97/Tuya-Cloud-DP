@@ -45,16 +45,31 @@ def _readable(x) -> str:
     return str(x)
 
 def _extract_spec(spec: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Build a map of code -> {type, values} from BOTH functions and status."""
     out: Dict[str, Dict[str, Any]] = {}
     if not spec or not spec.get("success"):
         return out
-    for f in (spec.get("result", {}).get("functions") or []):
+    res = spec.get("result") or {}
+    for f in (res.get("functions") or []):
         c = f.get("code")
         if c:
-            out[c] = {"type": f.get("type"), "values": f.get("values")}
+            out[c] = {"type": (f.get("type") or "").lower(), "values": f.get("values")}
+    # Many devices only expose types in 'status' entries
+    for s in (res.get("status") or []):
+        c = s.get("code")
+        if not c:
+            continue
+        typ = (s.get("type") or "").lower()
+        if c not in out:
+            out[c] = {"type": typ, "values": s.get("values")}
+        else:
+            # prefer a concrete type if we were missing/empty before
+            if not out[c].get("type") and typ:
+                out[c]["type"] = typ
     return out
 
 def _extract_status(status: Dict[str, Any]) -> Dict[str, Any]:
+    """Map code -> current value."""
     out: Dict[str, Any] = {}
     if not status or not status.get("success"):
         return out
@@ -64,42 +79,55 @@ def _extract_status(status: Dict[str, Any]) -> Dict[str, Any]:
             out[c] = i.get("value")
     return out
 
-def _label(code: str, typ: Optional[str], cur: Any) -> str:
-    cur_s = "—" if cur is None else f"{cur}"
-    t = typ or "unknown"
-    return f"{code} (type:{t}, current:{cur_s})"
+def _label(code: str, dpid_index: Optional[int], value: Any) -> str:
+    """Return a label like '1 – <code> (<value>)' for the dropdown."""
+    # Fallback if no DPID index known
+    dpid_str = str(dpid_index) if dpid_index is not None else "?"
+    val_str = f"{value}" if value is not None else "N/A"
+    return f"{dpid_str} – {code} ({val_str})"
 
-def _dp_schema(spec_map, status_map, defaults=None) -> vol.Schema:
+def _dp_schema(spec_map: Dict[str, Dict[str, Any]], status_map: Dict[str, Any], defaults: Optional[Dict[str, Any]] = None) -> vol.Schema:
+    """Use selectors with labels; infer types from spec OR live values when spec is missing."""
     defaults = defaults or {}
 
-    def t(v): return (v.get("type") or "").lower()
-    nums = [c for c, v in spec_map.items() if t(v) in ("integer", "float", "value")]
-    bls  = [c for c, v in spec_map.items() if t(v) == "bool"]
-    ens  = [c for c, v in spec_map.items() if t(v) == "enum"]
+    def typ_of(code: str) -> str:
+        t = (spec_map.get(code, {}).get("type") or "").lower()
+        if t:
+            return t
+        # infer from live value if spec type missing
+        v = status_map.get(code)
+        if isinstance(v, bool):
+            return "bool"
+        if isinstance(v, (int, float)):
+            return "integer"
+        return ""  # unknown
+
+    all_codes = sorted(set(spec_map.keys()) | set(status_map.keys()))
+    numeric = [c for c in all_codes if typ_of(c) in ("integer", "float", "value")]
+    boolean = [c for c in all_codes if typ_of(c) == "bool"]
+    enum    = [c for c in all_codes if typ_of(c) == "enum"]
 
     def opt_list(codes):
-        return [{"value": c, "label": _label(c, spec_map[c].get("type"), status_map.get(c))} for c in codes]
+        return [{"value": c, "label": _label(c, spec_map.get(c, {}).get("type"), status_map.get(c))} for c in codes]
 
-    num_opts  = opt_list(nums)
-    bool_opts = opt_list(bls)
-    enum_opts = opt_list(ens)
-
-    # ensure "(none)" is a selectable option for optional fields
+    num_opts  = opt_list(numeric)
+    bool_opts = opt_list(boolean)
+    enum_opts = opt_list(enum)
     none_opt = {"value": "", "label": "(none)"}
 
-    default_set = defaults.get(CONF_SETPOINT_CODE, (nums[0] if nums else ""))
+    # If still nothing, at least let user pick any code as setpoint
+    if not num_opts and all_codes:
+        num_opts = opt_list(all_codes)
 
-    # Build selectors
-    setpoint_sel = selector({"select": {"options": (num_opts or [{"value": "", "label": "(no numeric DPs)"}]), "mode": "dropdown"}})
-    curtemp_sel  = selector({"select": {"options": [none_opt] + num_opts, "mode": "dropdown"}})
-    power_sel    = selector({"select": {"options": [none_opt] + bool_opts, "mode": "dropdown"}})
-    mode_sel     = selector({"select": {"options": [none_opt] + enum_opts, "mode": "dropdown"}})
+    default_set = defaults.get(CONF_SETPOINT_CODE, (numeric[0] if numeric else (all_codes[0] if all_codes else "")))
+
+    sel = lambda opts: selector({"select": {"options": (opts or [{"value": "", "label": "(none)"}]), "mode": "dropdown"}})
 
     return vol.Schema({
-        vol.Required(CONF_SETPOINT_CODE, default=default_set): setpoint_sel,
-        vol.Optional(CONF_CURTEMP_CODE,  default=defaults.get(CONF_CURTEMP_CODE, "")):  curtemp_sel,
-        vol.Optional(CONF_POWER_CODE,    default=defaults.get(CONF_POWER_CODE, "")):    power_sel,
-        vol.Optional(CONF_MODE_CODE,     default=defaults.get(CONF_MODE_CODE, "")):     mode_sel,
+        vol.Required(CONF_SETPOINT_CODE, default=default_set): sel(num_opts),
+        vol.Optional(CONF_CURTEMP_CODE,  default=defaults.get(CONF_CURTEMP_CODE, "")):  sel([none_opt] + num_opts),
+        vol.Optional(CONF_POWER_CODE,    default=defaults.get(CONF_POWER_CODE, "")):    sel([none_opt] + bool_opts),
+        vol.Optional(CONF_MODE_CODE,     default=defaults.get(CONF_MODE_CODE, "")):     sel([none_opt] + enum_opts),
         vol.Optional(CONF_MIN_TEMP, default=5):  vol.Coerce(float),
         vol.Optional(CONF_MAX_TEMP, default=35): vol.Coerce(float),
         vol.Optional(CONF_PRECISION, default=1.0): vol.In([0.5, 1.0]),
