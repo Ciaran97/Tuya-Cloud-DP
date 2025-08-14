@@ -23,7 +23,7 @@ def resolve_endpoint(region: str) -> str:
     return ENDPOINTS.get((region or "us").lower(), ENDPOINTS["us"])
 
 def _sign(payload: str, secret: str) -> str:
-    return hmac.new(secret.encode("latin-1"), payload.encode("latin-1"), hashlib.sha256).hexdigest().upper()
+    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest().upper()
 
 class TuyaCloudApi:
     """Tiny signed client (requests run in executor by HA)."""
@@ -64,7 +64,7 @@ class TuyaCloudApi:
         url = f"{self._endpoint}/{path.lstrip('/')}"
         def _do():
             if method == "GET":
-                return requests.get(url, headers=hdrs, params=params, timeout=30)
+                return requests.get(url, headers=hdrs, timeout=30)
             if method == "POST":
                 return requests.post(url, headers=hdrs, params=params, data=body, timeout=30)
             raise ValueError("Unsupported method")
@@ -73,7 +73,7 @@ class TuyaCloudApi:
     # ---- Auth (project token) ----
     async def grant_type_1(self) -> str:
         """Project token (no user-code)."""
-        r = await self._req("GET", "/v1.0/token", params={"grant_type": 1})
+        r = await self._req("GET", "/v1.0/token?grant_type=1")
         if not r.ok:
             return f"HTTP {r.status_code}"
         j = r.json()
