@@ -1,102 +1,137 @@
+# custom_components/tuya_cloud_dp/config_flow.py
 from __future__ import annotations
-import json
 import voluptuous as vol
 from typing import Dict, Any
-
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
-    DOMAIN,
-    CONF_ACCESS_ID, CONF_ACCESS_SECRET, CONF_REGION, CONF_DEVICE_ID,
+    DOMAIN, CONF_ACCESS_ID, CONF_ACCESS_SECRET, CONF_REGION, CONF_DEVICE_ID,
     CONF_SETPOINT_CODE, CONF_MODE_CODE, CONF_POWER_CODE, CONF_CURTEMP_CODE,
-    CONF_MIN_TEMP, CONF_MAX_TEMP, CONF_PRECISION, CONF_ENDPOINT
+    CONF_MIN_TEMP, CONF_MAX_TEMP, CONF_PRECISION, CONF_ENDPOINT, CONF_USER_CODE
 )
-from .api import resolve_endpoint, connect_sync, get_spec_sync, get_status_sync
+from .api import (
+    resolve_endpoint, connect_sync, authorized_login_sync,
+    get_user_devices_sync, get_spec_sync, get_status_sync
+)
 
-REGIONS = ["us", "eu", "in", "cn"]
+REGIONS = ["us","eu","in","cn"]
 
 STEP1_SCHEMA = vol.Schema({
     vol.Required(CONF_ACCESS_ID): str,
     vol.Required(CONF_ACCESS_SECRET): str,
     vol.Required(CONF_REGION, default="us"): vol.In(REGIONS),
-    vol.Optional(CONF_ENDPOINT, default=""): str,  # allow explicit override
-    vol.Required(CONF_DEVICE_ID): str,
+    vol.Optional(CONF_ENDPOINT, default=""): str,   # leave blank normally
+    vol.Optional(CONF_USER_CODE, default=""): str,  # from Tuya/Smart Life app
 })
-
-def _choice_label(code: str, typ: str | None, cur: Any) -> str:
-    cur_s = f"{cur}" if cur is not None else "—"
-    t = typ or "unknown"
-    return f"{code}  (type: {t}, current: {cur_s})"
-
-def _build_step2_schema(spec: Dict[str, Dict[str, Any]], status: Dict[str, Any], defaults: Dict[str, str] | None = None):
-    defaults = defaults or {}
-    # Filter by likely types
-    number_codes = [c for c, v in spec.items() if (v.get("type") or "").lower() == "integer" or (v.get("type") or "").lower() == "float" or (v.get("type") or "").lower() == "value"]
-    bool_codes   = [c for c, v in spec.items() if (v.get("type") or "").lower() == "bool"]
-    enum_codes   = [c for c, v in spec.items() if (v.get("type") or "").lower() == "enum"]
-
-    # Map to {label: code}
-    def map_choices(codes):
-        return { _choice_label(c, (spec[c].get("type")), status.get(c)): c for c in codes }
-
-    setpoint_choices = map_choices(number_codes)
-    curtemp_choices  = {"(none)": ""} | map_choices(number_codes)
-    power_choices    = {"(none)": ""} | map_choices(bool_codes)
-    mode_choices     = {"(none)": ""} | map_choices(enum_codes)
-
-    return vol.Schema({
-        vol.Required(CONF_SETPOINT_CODE, default=defaults.get(CONF_SETPOINT_CODE, next(iter(setpoint_choices.values()), ""))): vol.In(setpoint_choices),
-        vol.Optional(CONF_CURTEMP_CODE, default=defaults.get(CONF_CURTEMP_CODE, "")): vol.In(curtemp_choices),
-        vol.Optional(CONF_POWER_CODE, default=defaults.get(CONF_POWER_CODE, "")): vol.In(power_choices),
-        vol.Optional(CONF_MODE_CODE, default=defaults.get(CONF_MODE_CODE, "")): vol.In(mode_choices),
-        vol.Optional(CONF_MIN_TEMP, default=5): vol.Coerce(float),
-        vol.Optional(CONF_MAX_TEMP, default=35): vol.Coerce(float),
-        vol.Optional(CONF_PRECISION, default=1.0): vol.In([0.5, 1.0]),
-    })
 
 class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
-
     def __init__(self):
-        self._step1: Dict[str, Any] = {}
+        self._cfg: Dict[str, Any] = {}
+        self._devices: list[Dict[str, Any]] = []
         self._spec: Dict[str, Dict[str, Any]] = {}
         self._status: Dict[str, Any] = {}
 
     async def async_step_user(self, user_input=None) -> FlowResult:
         if user_input is None:
             return self.async_show_form(step_id="user", data_schema=STEP1_SCHEMA)
-        # Save Step 1 and fetch spec/status
-        self._step1 = user_input
+
+        # Save basic config and authenticate
+        self._cfg = user_input
         endpoint = resolve_endpoint(user_input.get(CONF_REGION), user_input.get(CONF_ENDPOINT) or None)
+
         try:
             api = await self.hass.async_add_executor_job(
                 connect_sync, endpoint, user_input[CONF_ACCESS_ID], user_input[CONF_ACCESS_SECRET]
             )
-            self._spec = await self.hass.async_add_executor_job(get_spec_sync, api, user_input[CONF_DEVICE_ID])
-            self._status = await self.hass.async_add_executor_job(get_status_sync, api, user_input[CONF_DEVICE_ID])
-        except Exception as e:
-            return self.async_show_form(
-                step_id="user",
-                data_schema=STEP1_SCHEMA,
-                errors={"base": "cannot_connect"},
-                description_placeholders={"err": str(e)[:200]},
-            )
-        if not self._spec:
-            return self.async_show_form(
-                step_id="user",
-                data_schema=STEP1_SCHEMA,
-                errors={"base": "no_spec"},
-            )
+            uc = (user_input.get(CONF_USER_CODE) or "").strip()
+            if uc:
+                auth_res = await self.hass.async_add_executor_job(authorized_login_sync, api, uc)
+                if not auth_res or not auth_res.get("success"):
+                    return self.async_show_form(step_id="user", data_schema=STEP1_SCHEMA,
+                        errors={"base": "cannot_connect"})
+            # Discover devices like LocalTuya’s cloud step
+            self._devices = await self.hass.async_add_executor_job(get_user_devices_sync, api)
+            # Cache the api client on hass for later steps if you want, or reconnect later
+            self.hass.data.setdefault(DOMAIN, {})["api_seed"] = (endpoint, user_input[CONF_ACCESS_ID], user_input[CONF_ACCESS_SECRET], uc)
+        except Exception:
+            return self.async_show_form(step_id="user", data_schema=STEP1_SCHEMA,
+                                        errors={"base": "cannot_connect"})
+
+        return await self.async_step_pick_device()
+
+    async def async_step_pick_device(self, user_input=None) -> FlowResult:
+        if not self._devices:
+            # No devices — let user go back
+            return self.async_abort(reason="no_devices")
+
+        # Build choices: show name / product / id like LocalTuya
+        choices = {}
+        for d in self._devices:
+            did = d.get("id") or d.get("device_id")
+            name = d.get("name") or "Unnamed"
+            prod = d.get("product_name") or d.get("category") or ""
+            label = f"{name} · {prod} · {did}"
+            if did:
+                choices[label] = did
+
+        schema = vol.Schema({
+            vol.Required(CONF_DEVICE_ID): vol.In(choices)
+        })
+
+        if user_input is None:
+            return self.async_show_form(step_id="pick_device", data_schema=schema)
+
+        self._cfg[CONF_DEVICE_ID] = user_input[CONF_DEVICE_ID]
+        # Prefetch spec/status for DP mapping
+        endpoint, aid, sec, uc = self.hass.data[DOMAIN].get("api_seed")
+        # Reconnect + (re)login to be safe
+        try:
+            from .api import connect_sync, authorized_login_sync, get_spec_sync, get_status_sync
+            api = await self.hass.async_add_executor_job(connect_sync, endpoint, aid, sec)
+            if uc:
+                await self.hass.async_add_executor_job(authorized_login_sync, api, uc)
+            self._spec = await self.hass.async_add_executor_job(get_spec_sync, api, self._cfg[CONF_DEVICE_ID])
+            self._status = await self.hass.async_add_executor_job(get_status_sync, api, self._cfg[CONF_DEVICE_ID])
+        except Exception:
+            self._spec, self._status = {}, {}
+
         return await self.async_step_map_dp()
 
+    def _build_dp_schema(self, defaults: Dict[str,str] | None = None):
+        defaults = defaults or {}
+        # Filter likely types from spec
+        number = [c for c,v in self._spec.items() if (v.get("type") or "").lower() in ("integer","float","value")]
+        boolean = [c for c,v in self._spec.items() if (v.get("type") or "").lower() == "bool"]
+        enum = [c for c,v in self._spec.items() if (v.get("type") or "").lower() == "enum"]
+
+        def label(c):
+            t = self._spec.get(c,{}).get("type") or "?"
+            cur = self._status.get(c, "—")
+            return f"{c} (type:{t}, current:{cur})"
+
+        map_num = {label(c): c for c in number}
+        map_bool = {"(none)": ""} | {label(c): c for c in boolean}
+        map_enum = {"(none)": ""} | {label(c): c for c in enum}
+
+        return vol.Schema({
+            vol.Required(CONF_SETPOINT_CODE, default=defaults.get(CONF_SETPOINT_CODE, next(iter(map_num.values()), ""))): vol.In(map_num),
+            vol.Optional(CONF_CURTEMP_CODE, default=defaults.get(CONF_CURTEMP_CODE,"")): vol.In(map_num | {"(none)": ""}),
+            vol.Optional(CONF_POWER_CODE, default=defaults.get(CONF_POWER_CODE,"")): vol.In(map_bool),
+            vol.Optional(CONF_MODE_CODE,  default=defaults.get(CONF_MODE_CODE,"")):  vol.In(map_enum),
+            vol.Optional(CONF_MIN_TEMP, default=5): vol.Coerce(float),
+            vol.Optional(CONF_MAX_TEMP, default=35): vol.Coerce(float),
+            vol.Optional(CONF_PRECISION, default=1.0): vol.In([0.5,1.0]),
+        })
+
     async def async_step_map_dp(self, user_input=None) -> FlowResult:
-        schema = _build_step2_schema(self._spec, self._status)
+        schema = self._build_dp_schema()
         if user_input is None:
             return self.async_show_form(step_id="map_dp", data_schema=schema)
 
-        data = {**self._step1, **user_input}
+        data = {**self._cfg, **user_input}
         title = f"Tuya Cloud DP ({data.get(CONF_DEVICE_ID)})"
         return self.async_create_entry(title=title, data=data)
 
@@ -115,26 +150,24 @@ class TuyaCloudDPOptionsFlow(config_entries.OptionsFlow):
         data = {**self.entry.data, **(self.entry.options or {})}
         endpoint = resolve_endpoint(data.get(CONF_REGION), data.get(CONF_ENDPOINT) or None)
         try:
-            api = await self.hass.async_add_executor_job(
-                connect_sync, endpoint, data[CONF_ACCESS_ID], data[CONF_ACCESS_SECRET]
-            )
+            api = await self.hass.async_add_executor_job(connect_sync, endpoint, data[CONF_ACCESS_ID], data[CONF_ACCESS_SECRET])
+            uc = (data.get(CONF_USER_CODE) or "").strip()
+            if uc:
+                await self.hass.async_add_executor_job(authorized_login_sync, api, uc)
             self._spec = await self.hass.async_add_executor_job(get_spec_sync, api, data[CONF_DEVICE_ID])
             self._status = await self.hass.async_add_executor_job(get_status_sync, api, data[CONF_DEVICE_ID])
-        except Exception as e:
-            # If fetch fails, still let them edit previous choices
-            self._spec = {}
-            self._status = {}
+        except Exception:
+            self._spec, self._status = {}, {}
 
-        defaults = {
-            CONF_SETPOINT_CODE: data.get(CONF_SETPOINT_CODE, "temp_set"),
-            CONF_CURTEMP_CODE: data.get(CONF_CURTEMP_CODE, ""),
-            CONF_POWER_CODE: data.get(CONF_POWER_CODE, ""),
-            CONF_MODE_CODE: data.get(CONF_MODE_CODE, ""),
-        }
-        schema = _build_step2_schema(self._spec, self._status, defaults)
+        schema = TuyaCloudDPConfigFlow._build_dp_schema(self, {
+            CONF_SETPOINT_CODE: data.get(CONF_SETPOINT_CODE,"temp_set"),
+            CONF_CURTEMP_CODE: data.get(CONF_CURTEMP_CODE,""),
+            CONF_POWER_CODE: data.get(CONF_POWER_CODE,""),
+            CONF_MODE_CODE:  data.get(CONF_MODE_CODE,""),
+        })
+
         if user_input is None:
             return self.async_show_form(step_id="init", data_schema=schema)
 
-        # Save options
         new_opts = {**(self.entry.options or {}), **user_input}
         return self.async_create_entry(title="", data=new_opts)
