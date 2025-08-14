@@ -3,13 +3,12 @@ import asyncio
 import logging
 
 from homeassistant.components.climate import ClimateEntity
-from homeassistant.components.climate.const import (
-    HVACMode,
-    ClimateEntityFeature,
-)
+from homeassistant.components.climate.const import HVACMode, ClimateEntityFeature
 from homeassistant.const import UnitOfTemperature, ATTR_TEMPERATURE
+from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import (
+    DOMAIN,
     CONF_ACCESS_ID,
     CONF_ACCESS_SECRET,
     CONF_REGION,
@@ -35,7 +34,7 @@ async def _tuya_api(cfg):
         cfg[CONF_ACCESS_ID],
         cfg[CONF_ACCESS_SECRET],
     )
-    # token lifecycle handled by SDK
+    # Token lifecycle handled by SDK
     api.connect()
     return api
 
@@ -43,11 +42,14 @@ async def _tuya_api(cfg):
 async def async_setup_entry(hass, entry, async_add_entities):
     cfg = {**entry.data, **(entry.options or {})}
     api = await _tuya_api(cfg)
-    async_add_entities([TuyaDPClimate(api, cfg)])
+    async_add_entities([TuyaDPClimate(api, cfg)], update_before_add=True)
 
 
 class TuyaDPClimate(ClimateEntity):
     _attr_name = "Tuya Cloud DP Thermostat"
+    _attr_should_poll = True  # cloud polling
+    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+    _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
 
     def __init__(self, api: TuyaOpenAPI, cfg: dict):
         self.api = api
@@ -59,23 +61,29 @@ class TuyaDPClimate(ClimateEntity):
         self._mode_code = cfg.get(CONF_MODE_CODE) or None
         self._power_code = cfg.get(CONF_POWER_CODE) or None
 
+        self._attr_unique_id = f"{DOMAIN}_{self._device_id}"
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS
-        self._attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
-        self._attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
         self._attr_min_temp = float(cfg.get(CONF_MIN_TEMP, 5))
         self._attr_max_temp = float(cfg.get(CONF_MAX_TEMP, 35))
         self._attr_precision = float(cfg.get(CONF_PRECISION, 1.0))
-
         self._attr_hvac_mode = HVACMode.OFF
         self._attr_target_temperature = None
         self._attr_current_temperature = None
+
+        # Device registry entry so it appears under “Devices”
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._device_id)},
+            name="Tuya Cloud DP Thermostat",
+            manufacturer="Tuya",
+            model=self.cfg.get("model", "WBR3-HYWE_v3.0"),
+            configuration_url=f"https://iot.tuya.com",
+        )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if self._power_code is None:
             self._attr_hvac_mode = hvac_mode
             self.async_write_ha_state()
             return
-
         val = hvac_mode != HVACMode.OFF
         await self._send([{"code": self._power_code, "value": val}])
         self._attr_hvac_mode = hvac_mode
@@ -93,7 +101,6 @@ class TuyaDPClimate(ClimateEntity):
         self.async_write_ha_state()
 
     async def async_update(self) -> None:
-        # Poll device status from Tuya Cloud
         try:
             res = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -109,13 +116,10 @@ class TuyaDPClimate(ClimateEntity):
                 for i in (res.get("result") or [])
                 if isinstance(i, dict) and "code" in i
             }
-
             if self._cur_code and self._cur_code in status:
                 self._attr_current_temperature = status[self._cur_code]
-
             if self._set_code in status:
                 self._attr_target_temperature = status[self._set_code]
-
             if self._power_code and self._power_code in status:
                 self._attr_hvac_mode = (
                     HVACMode.HEAT if bool(status[self._power_code]) else HVACMode.OFF
