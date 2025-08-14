@@ -96,6 +96,11 @@ class TuyaCloudApi:
         r = await self._req("GET", f"/v1.0/iot-03/devices/{device_id}/specifications")
         return r.json() if r.ok else {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}
 
+    async def device_functions(self, device_id: str) -> Dict[str, Any]:
+        # Some tenants expose writable functions here (sometimes richer than /specifications)
+        r = await self._req("GET", f"/v1.0/iot-03/devices/{device_id}/functions")
+        return r.json() if r.ok else {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}
+
     async def device_status(self, device_id: str) -> Dict[str, Any]:
         r = await self._req("GET", f"/v1.0/iot-03/devices/{device_id}/status")
         return r.json() if r.ok else {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}

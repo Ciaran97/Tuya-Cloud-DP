@@ -44,6 +44,31 @@ def _readable(x) -> str:
         return x.get("msg") or x.get("message") or x.get("code") or str(x)
     return str(x)
 
+def _parse_values_json(v):
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except Exception:
+            return {}
+    return v or {}
+
+def _merge_functions(*payloads) -> Dict[str, Dict[str, Any]]:
+    """Create code -> {type, values} from any number of Tuya 'functions' payloads."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for p in payloads:
+        if not p or not p.get("success"):
+            continue
+        res = p.get("result") or {}
+        funcs = res.get("functions") or res.get("result") or []  # some responses nest differently
+        for f in funcs:
+            code = f.get("code")
+            if not code:
+                continue
+            t = (f.get("type") or "").lower()
+            vals = _parse_values_json(f.get("values"))
+            out[code] = {"type": t, "values": vals}
+    return out
+
 def _extract_spec(spec: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Build a map of code -> {type, values} from BOTH functions and status."""
     out: Dict[str, Dict[str, Any]] = {}
@@ -68,6 +93,16 @@ def _extract_spec(spec: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                 out[c]["type"] = typ
     return out
 
+def _extract_status_map(status_payload) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if not status_payload or not status_payload.get("success"):
+        return out
+    for i in (status_payload.get("result") or []):
+        c = i.get("code")
+        if c:
+            out[c] = i.get("value")
+    return out
+
 def _extract_status(status: Dict[str, Any]) -> Dict[str, Any]:
     """Map code -> current value."""
     out: Dict[str, Any] = {}
@@ -86,51 +121,59 @@ def _label(code: str, dpid_index: Optional[int], value: Any) -> str:
     val_str = f"{value}" if value is not None else "N/A"
     return f"{dpid_str} – {code} ({val_str})"
 
+def _label(code: str, typ: Optional[str], cur: Any) -> str:
+    cur_s = "N/A" if cur is None else str(cur)
+    t = typ or "?"
+    return f"{code}  (type:{t}, current:{cur_s})"
+
 def _dp_schema(spec_map: Dict[str, Dict[str, Any]], status_map: Dict[str, Any], defaults: Optional[Dict[str, Any]] = None) -> vol.Schema:
-    """Use selectors with labels; infer types from spec OR live values when spec is missing."""
     defaults = defaults or {}
+
+    # Build union of codes we know about
+    all_codes = sorted(set(spec_map.keys()) | set(status_map.keys()))
+    if not all_codes:
+        # last resort: prevent empty form
+        all_codes = ["temp_set", "temp_current", "Power", "Mode"]
 
     def typ_of(code: str) -> str:
         t = (spec_map.get(code, {}).get("type") or "").lower()
         if t:
             return t
-        # infer from live value if spec type missing
         v = status_map.get(code)
         if isinstance(v, bool):
             return "bool"
         if isinstance(v, (int, float)):
             return "integer"
-        return ""  # unknown
+        return ""
 
-    all_codes = sorted(set(spec_map.keys()) | set(status_map.keys()))
+    # Partition by type
     numeric = [c for c in all_codes if typ_of(c) in ("integer", "float", "value")]
     boolean = [c for c in all_codes if typ_of(c) == "bool"]
     enum    = [c for c in all_codes if typ_of(c) == "enum"]
 
+    # If we still don't have a numeric candidate for setpoint, allow any code
+    numeric_fallback = numeric if numeric else all_codes
+
     def opt_list(codes):
         return [{"value": c, "label": _label(c, spec_map.get(c, {}).get("type"), status_map.get(c))} for c in codes]
 
-    num_opts  = opt_list(numeric)
+    num_opts  = opt_list(numeric_fallback)
     bool_opts = opt_list(boolean)
     enum_opts = opt_list(enum)
+
     none_opt = {"value": "", "label": "(none)"}
-
-    # If still nothing, at least let user pick any code as setpoint
-    if not num_opts and all_codes:
-        num_opts = opt_list(all_codes)
-
-    default_set = defaults.get(CONF_SETPOINT_CODE, (numeric[0] if numeric else (all_codes[0] if all_codes else "")))
+    default_set = defaults.get("setpoint_code") or (numeric[0] if numeric else (all_codes[0] if all_codes else ""))
 
     sel = lambda opts: selector({"select": {"options": (opts or [{"value": "", "label": "(none)"}]), "mode": "dropdown"}})
 
     return vol.Schema({
-        vol.Required(CONF_SETPOINT_CODE, default=default_set): sel(num_opts),
-        vol.Optional(CONF_CURTEMP_CODE,  default=defaults.get(CONF_CURTEMP_CODE, "")):  sel([none_opt] + num_opts),
-        vol.Optional(CONF_POWER_CODE,    default=defaults.get(CONF_POWER_CODE, "")):    sel([none_opt] + bool_opts),
-        vol.Optional(CONF_MODE_CODE,     default=defaults.get(CONF_MODE_CODE, "")):     sel([none_opt] + enum_opts),
-        vol.Optional(CONF_MIN_TEMP, default=5):  vol.Coerce(float),
-        vol.Optional(CONF_MAX_TEMP, default=35): vol.Coerce(float),
-        vol.Optional(CONF_PRECISION, default=1.0): vol.In([0.5, 1.0]),
+        vol.Required("setpoint_code", default=default_set): sel(num_opts),
+        vol.Optional("curtemp_code",  default=defaults.get("curtemp_code","")):  sel([none_opt] + num_opts),
+        vol.Optional("power_code",    default=defaults.get("power_code","")):    sel([none_opt] + bool_opts),
+        vol.Optional("mode_code",     default=defaults.get("mode_code","")):     sel([none_opt] + enum_opts),
+        vol.Optional("min_temp", default=5):  vol.Coerce(float),
+        vol.Optional("max_temp", default=35): vol.Coerce(float),
+        vol.Optional("precision", default=1.0): vol.In([0.1, 0.5, 1.0]),
     })
 
 def _error_schema(msg: str) -> vol.Schema:
@@ -233,19 +276,36 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._cfg1[CONF_DEVICE_ID] = user_input[CONF_DEVICE_ID]
 
         # Fetch spec/status to build DP dropdowns
+                # Fetch functions/spec/status to build DP dropdowns (union, with live values)
         try:
-            api = TuyaCloudApi(self.hass, self._cfg1[CONF_REGION], self._cfg1[CONF_ACCESS_ID], self._cfg1[CONF_ACCESS_SECRET])
+            api = TuyaCloudApi(
+                self.hass,
+                self._cfg1[CONF_REGION],
+                self._cfg1[CONF_ACCESS_ID],
+                self._cfg1[CONF_ACCESS_SECRET],
+            )
             if await api.grant_type_1() != "ok":
                 return self.async_show_form(step_id="pick_device", data_schema=schema, errors={"base": "cannot_connect"})
+
+            # Try both sources for functions; some tenants only fill one of them
+            fx = await api.device_functions(self._cfg1[CONF_DEVICE_ID])
             spec = await api.device_spec(self._cfg1[CONF_DEVICE_ID])
             status = await api.device_status(self._cfg1[CONF_DEVICE_ID])
-            self._spec = _extract_spec(spec)
-            self._status = _extract_status(status)
-        except Exception as e:
-            _LOGGER.exception("pick_device failed: %s", e)
-            return self.async_show_form(step_id="pick_device", data_schema=schema, errors={"base": "unknown"})
 
-        return await self.async_step_map_dp()
+            funcs_map = _merge_functions(fx, spec)  # writable commands live here
+            status_map = _extract_status_map(status)
+
+            # If functions are totally empty, fall back to status-only so UI still shows codes.
+            # Writes will still require real function codes, but at least the user can pick.
+            self._spec = funcs_map
+            self._status = status_map
+
+            # Tiny debug so we can see counts in HA logs if needed
+            _LOGGER.debug("DP build: functions=%d status=%d", len(self._spec), len(self._status))
+
+        except Exception as e:
+            _LOGGER.exception("pick_device fetch failed: %s", e)
+            return self.async_show_form(step_id="pick_device", data_schema=schema, errors={"base": "unknown"})
 
     async def async_step_map_dp(self, user_input=None) -> FlowResult:
         schema = _dp_schema(self._spec, self._status)

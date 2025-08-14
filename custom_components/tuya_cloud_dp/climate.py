@@ -1,164 +1,381 @@
 from __future__ import annotations
+
 import asyncio
+import json
 import logging
+from datetime import timedelta
+from typing import Any, Dict, Optional
 
 from homeassistant.components.climate import ClimateEntity
-from homeassistant.components.climate.const import HVACMode, ClimateEntityFeature
-from homeassistant.const import UnitOfTemperature, ATTR_TEMPERATURE
-from homeassistant.helpers.device_registry import DeviceInfo
-
-from .const import (
-    DOMAIN,
-    CONF_ACCESS_ID,
-    CONF_ACCESS_SECRET,
-    CONF_REGION,
-    CONF_DEVICE_ID,
-    CONF_SETPOINT_CODE,
-    CONF_MODE_CODE,
-    CONF_POWER_CODE,
-    CONF_CURTEMP_CODE,
-    CONF_MIN_TEMP,
-    CONF_MAX_TEMP,
-    CONF_PRECISION,
+from homeassistant.components.climate.const import (
+    ClimateEntityFeature,
+    HVACAction,
+    HVACMode,
 )
+from homeassistant.const import UnitOfTemperature, ATTR_TEMPERATURE
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.update_coordinator import (
+    DataUpdateCoordinator,
+    CoordinatorEntity,
+    UpdateFailed,
+)
+
+from .const import DOMAIN
+from .cloud_api import TuyaCloudApi
 
 _LOGGER = logging.getLogger(__name__)
 
-# Tuya SDK (sync)
-from tuya_iot import TuyaOpenAPI
+SCAN_INTERVAL = timedelta(seconds=20)
+TUYA_TOKEN_ERRS = {"1010", "1011"}  # invalid/expired
 
-ENDPOINTS = {
-    "us": "https://openapi.tuyaus.com",
-    "eu": "https://openapi.tuyaeu.com",
-    "in": "https://openapi.tuyain.com",
-    "cn": "https://openapi.tuyacn.com",
-}
+# Entry keys (from your config flow)
+CONF_REGION = "region"
+CONF_ACCESS_ID = "access_id"
+CONF_ACCESS_SECRET = "access_secret"
+CONF_USER_ID = "user_id"
+CONF_DEVICE_ID = "device_id"
 
-async def async_added_to_hass(self):
-    # Keep entity in sync with Options changes
-    self.async_on_remove(
-        self.hass.config_entries.async_update_listener(self._on_options_update)
-    )
+CONF_SETPOINT_CODE = "setpoint_code"
+CONF_CURTEMP_CODE = "curtemp_code"
+CONF_POWER_CODE = "power_code"
+CONF_MODE_CODE = "mode_code"
 
-async def _on_options_update(self, entry):
-    if entry.entry_id != self.platform.config_entry.entry_id:
-        return
-    # Refresh cfg from updated options
-    new_cfg = {**entry.data, **(entry.options or {})}
-    self.cfg = new_cfg
-    self._set_code = new_cfg.get("setpoint_code", self._set_code)
-    self._cur_code = new_cfg.get("curtemp_code", self._cur_code)
-    self._power_code = new_cfg.get("power_code", self._power_code)
-    self._mode_code = new_cfg.get("mode_code", self._mode_code)
-    await self.async_update()
-    self.async_write_ha_state()
+CONF_MIN_TEMP = "min_temp"
+CONF_MAX_TEMP = "max_temp"
+CONF_PRECISION = "precision"
 
-def _resolve_endpoint(cfg: dict) -> str:
-    region = (cfg.get(CONF_REGION) or "us").lower()
-    return ENDPOINTS.get(region, ENDPOINTS["us"])
+PLATFORM = "climate"
 
 
-async def _tuya_api(hass, cfg):
-    """Create SDK client and connect in executor (non-blocking for HA)."""
-    endpoint = _resolve_endpoint(cfg)
-    api = TuyaOpenAPI(endpoint, cfg[CONF_ACCESS_ID], cfg[CONF_ACCESS_SECRET])
-    await hass.async_add_executor_job(api.connect)
-    return api
+async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
+    """Set up Tuya Cloud DP climate from a config entry."""
+    cfg = entry.data
+    region = cfg[CONF_REGION]
+    aid = cfg[CONF_ACCESS_ID]
+    sec = cfg[CONF_ACCESS_SECRET]
+    device_id = cfg[CONF_DEVICE_ID]
+
+    api = TuyaCloudApi(hass, region, aid, sec)
+
+    coordinator = TuyaCoordinator(hass, api, device_id)
+    await coordinator.async_config_entry_first_refresh()
+
+    entity = TuyaCloudDPClimate(hass, entry, coordinator)
+    async_add_entities([entity])
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    cfg = {**entry.data, **(entry.options or {})}
-    api = await _tuya_api(hass, cfg)
-    async_add_entities([TuyaDPClimate(hass, api, cfg)], update_before_add=True)
+class TuyaCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
+    """Coordinator to poll Tuya device status."""
 
-
-class TuyaDPClimate(ClimateEntity):
-    _attr_name = "Tuya Cloud DP Thermostat"
-    _attr_should_poll = True
-    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
-    _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
-
-    def __init__(self, hass, api: TuyaOpenAPI, cfg: dict):
-        self.hass = hass
-        self.api = api
-        self.cfg = cfg
-
-        self._device_id = cfg[CONF_DEVICE_ID]
-        self._set_code = cfg[CONF_SETPOINT_CODE]
-        self._cur_code = cfg.get(CONF_CURTEMP_CODE) or None
-        self._mode_code = cfg.get(CONF_MODE_CODE) or None
-        self._power_code = cfg.get(CONF_POWER_CODE) or None
-
-        self._attr_unique_id = f"{DOMAIN}_{self._device_id}"
-        self._attr_temperature_unit = UnitOfTemperature.CELSIUS
-        self._attr_min_temp = float(cfg.get(CONF_MIN_TEMP, 5))
-        self._attr_max_temp = float(cfg.get(CONF_MAX_TEMP, 35))
-        self._attr_precision = float(cfg.get(CONF_PRECISION, 1.0))
-        self._attr_hvac_mode = HVACMode.OFF
-        self._attr_target_temperature = None
-        self._attr_current_temperature = None
-
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self._device_id)},
-            name="Tuya Cloud DP Thermostat",
-            manufacturer="Tuya",
-            model=self.cfg.get("model", "WBR3-HYWE_v3.0"),
-            configuration_url="https://iot.tuya.com",
+    def __init__(self, hass: HomeAssistant, api: TuyaCloudApi, device_id: str) -> None:
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"tuya_cloud_dp_{device_id}",
+            update_interval=SCAN_INTERVAL,
         )
+        self._api = api
+        self._device_id = device_id
+        self._token_ready = False
 
-    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        if self._power_code is None:
-            self._attr_hvac_mode = hvac_mode
+    async def _ensure_token(self) -> None:
+        if not self._token_ready:
+            res = await self._api.grant_type_1()
+            if res != "ok":
+                raise UpdateFailed(f"token: {res}")
+            self._token_ready = True
+
+    async def _fetch_status_once(self) -> Dict[str, Any]:
+        await self._ensure_token()
+        j = await self._api.device_status(self._device_id)
+        if not j or not j.get("success"):
+            # Surface Tuya code if present
+            code = str(j.get("code")) if isinstance(j, dict) else "http"
+            msg = j.get("msg") if isinstance(j, dict) else str(j)
+            raise UpdateFailed(f"status: {code} {msg}")
+        # Normalize into code->value
+        out: Dict[str, Any] = {}
+        for item in j.get("result", []):
+            c = item.get("code")
+            if c is not None:
+                out[c] = item.get("value")
+        return out
+
+    async def _async_update_data(self) -> Dict[str, Any]:
+        """Refresh device status. Refresh token once if needed."""
+        try:
+            return await self._fetch_status_once()
+        except UpdateFailed as e:
+            # If token invalid/expired -> refresh once then retry
+            txt = str(e)
+            if any(err in txt for err in TUYA_TOKEN_ERRS):
+                _LOGGER.debug("Token issue detected (%s), refreshing", txt)
+                self._token_ready = False
+                await asyncio.sleep(0)  # yield
+                return await self._fetch_status_once()
+            raise
+
+
+class TuyaCloudDPClimate(CoordinatorEntity[TuyaCoordinator], ClimateEntity):
+    """HA Climate entity backed by Tuya Cloud /commands & /status."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, hass: HomeAssistant, entry, coordinator: TuyaCoordinator) -> None:
+        super().__init__(coordinator)
+        self._hass = hass
+        self._entry = entry
+        d = entry.data
+
+        self._device_id: str = d[CONF_DEVICE_ID]
+
+        # Codes chosen in the flow
+        self._code_set: str = d.get(CONF_SETPOINT_CODE) or "temp_set"
+        self._code_cur: Optional[str] = d.get(CONF_CURTEMP_CODE) or "temp_current"
+        self._code_power: Optional[str] = d.get(CONF_POWER_CODE) or "Power"
+        self._code_mode: Optional[str] = d.get(CONF_MODE_CODE) or "Mode"
+
+        # Defaults; will refine from specifications when available
+        self._scale = 1  # temp_set scale (10 means 0.1°C)
+        self._step_raw = 1  # integer step in scaled units
+        self._min_raw = 5
+        self._max_raw = 700
+
+        self._attr_name = f"Tuya Climate {self._device_id[-6:]}"
+        self._attr_temperature_unit = UnitOfTemperature.CELSIUS
+        self._attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+
+        # precision: prefer entry override; else from scale
+        pr = d.get(CONF_PRECISION)
+        self._attr_precision = float(pr) if pr is not None else 0.1
+
+        # apply min/max overrides from entry (in °C), else from spec later
+        self._min_temp_override = d.get(CONF_MIN_TEMP)
+        self._max_temp_override = d.get(CONF_MAX_TEMP)
+
+        # Prepare runtime API (same as coordinator’s)
+        self._api = coordinator._api  # reuse underlying client
+
+        self._hvac_modes_supported = {HVACMode.OFF, HVACMode.HEAT, HVACMode.AUTO}
+        self._attr_hvac_modes = list(self._hvac_modes_supported)
+
+        # kick off one-time spec fetch in background
+        self._spec_fetched = False
+        hass.async_create_task(self._async_load_spec())
+
+    # ---------- Helpers: spec & scaling ----------
+
+    @property
+    def _scale_factor(self) -> float:
+        # scale=1 → values are in tenths (divide by 10)
+        return 10.0 if self._scale == 1 else (10.0 ** self._scale if self._scale > 1 else 1.0)
+
+    def _to_device_raw(self, celsius: float) -> int:
+        return int(round(celsius * self._scale_factor))
+
+    def _from_device_raw(self, raw: Any) -> Optional[float]:
+        try:
+            return float(raw) / self._scale_factor
+        except (TypeError, ValueError):
+            return None
+
+    async def _async_load_spec(self) -> None:
+        """Fetch specifications and adjust min/max/scale/step + supported modes."""
+        try:
+            await self.coordinator._ensure_token()
+            spec = await self._api.device_spec(self._device_id)
+            if not spec or not spec.get("success"):
+                _LOGGER.debug("spec not available: %s", spec)
+                return
+            res = spec.get("result") or {}
+            funcs = res.get("functions") or []
+            # pull temp_set constraints
+            for f in funcs:
+                if f.get("code") == self._code_set:
+                    try:
+                        values = f.get("values") or "{}"
+                        if isinstance(values, str):
+                            values = json.loads(values)
+                        self._scale = int(values.get("scale", self._scale))
+                        self._step_raw = int(values.get("step", self._step_raw))
+                        self._min_raw = int(values.get("min", self._min_raw))
+                        self._max_raw = int(values.get("max", self._max_raw))
+                    except Exception as e:
+                        _LOGGER.debug("parse temp_set values failed: %s", e)
+                    break
+
+            # Fill HA ranges (°C); prefer explicit overrides if present
+            min_c = self._from_device_raw(self._min_raw) or 5.0
+            max_c = self._from_device_raw(self._max_raw) or 70.0
+            self._attr_min_temp = float(self._min_temp_override) if self._min_temp_override is not None else float(min_c)
+            self._attr_max_temp = float(self._max_temp_override) if self._max_temp_override is not None else float(max_c)
+
+            # Precision: derive from step if not overridden
+            if self._entry.data.get(CONF_PRECISION) is None:
+                step_c = self._from_device_raw(self._step_raw) or 0.5
+                # HA precision only allows a few values; clamp to 0.1 or 0.5 or 1.0
+                self._attr_precision = 0.1 if step_c <= 0.1 else (0.5 if step_c <= 0.5 else 1.0)
+
+            # Supported hvac modes from enums if available
+            modes_available = set()
+            for f in funcs:
+                if f.get("code") == (self._code_mode or "") and isinstance(f.get("values"), str):
+                    try:
+                        rng = json.loads(f["values"]).get("range") or []
+                        modes_available.update(rng)
+                    except Exception:
+                        pass
+            supported = {HVACMode.OFF}
+            if "Manual" in modes_available or self._code_power:
+                supported.add(HVACMode.HEAT)  # use Manual/Power as "heat"
+            if "Program" in modes_available or "TempProg" in modes_available:
+                supported.add(HVACMode.AUTO)
+            self._hvac_modes_supported = supported or {HVACMode.OFF, HVACMode.HEAT}
+            self._attr_hvac_modes = list(self._hvac_modes_supported)
+
+            self._spec_fetched = True
             self.async_write_ha_state()
-            return
-        val = hvac_mode != HVACMode.OFF
-        await self._send([{"code": self._power_code, "value": val}])
-        self._attr_hvac_mode = hvac_mode
-        await self.async_update()
-        self.async_write_ha_state()
+        except Exception as e:
+            _LOGGER.debug("spec fetch failed: %s", e)
+
+    # ---------- Entity basics ----------
+
+    @property
+    def unique_id(self) -> str:
+        return f"{DOMAIN}_{self._device_id}"
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._device_id)},
+            "name": self.name,
+            "manufacturer": "Tuya",
+            "model": "Cloud DP Climate",
+            "via_device": (DOMAIN, "cloud"),
+        }
+
+    # ---------- State from coordinator ----------
+
+    @property
+    def current_temperature(self) -> Optional[float]:
+        if not self._code_cur:
+            return None
+        raw = self.coordinator.data.get(self._code_cur)
+        return self._from_device_raw(raw)
+
+    @property
+    def target_temperature(self) -> Optional[float]:
+        raw = self.coordinator.data.get(self._code_set)
+        return self._from_device_raw(raw)
+
+    @property
+    def hvac_action(self) -> Optional[HVACAction]:
+        # Prefer explicit Heating_state if present
+        heating = self.coordinator.data.get("Heating_state")
+        power = self.coordinator.data.get(self._code_power) if self._code_power else True
+        if power is False:
+            return HVACAction.OFF
+        if heating is True:
+            return HVACAction.HEATING
+        return HVACAction.IDLE
+
+    @property
+    def hvac_mode(self) -> HVACMode:
+        power = self.coordinator.data.get(self._code_power) if self._code_power else True
+        if power is False:
+            return HVACMode.OFF
+        mode = (self.coordinator.data.get(self._code_mode) or "").lower()
+        if mode in ("program", "tempprog"):
+            return HVACMode.AUTO
+        # With these thermostats, "Manual" means on/heat
+        return HVACMode.HEAT
+
+    # ---------- Commands ----------
+
+    async def _send(self, code: str, value: Any) -> None:
+        """Send a single Tuya /commands write; refresh token on 1010/1011."""
+        async def _once() -> Dict[str, Any]:
+            body = {"commands": [{"code": code, "value": value}]}
+            await self.coordinator._ensure_token()
+            resp = await self._api._req("POST", f"/v1.0/iot-03/devices/{self._device_id}/commands", body_obj=body)
+            try:
+                j = resp.json()
+            except Exception:
+                j = {"success": False, "code": "http", "msg": f"HTTP {resp.status_code}"}
+            return j
+
+        j = await _once()
+        if j and not j.get("success") and str(j.get("code")) in TUYA_TOKEN_ERRS:
+            # refresh token and retry once
+            self.coordinator._token_ready = False
+            j = await _once()
+        if not j or not j.get("success"):
+            code_s = j.get("code") if isinstance(j, dict) else "http"
+            msg = j.get("msg") if isinstance(j, dict) else str(j)
+            raise RuntimeError(f"command failed: {code_s} {msg}")
 
     async def async_set_temperature(self, **kwargs) -> None:
-        if ATTR_TEMPERATURE not in kwargs:
+        temp = kwargs.get(ATTR_TEMPERATURE)
+        if temp is None:
             return
-        t = float(kwargs[ATTR_TEMPERATURE])
-        t = max(self.min_temp, min(self.max_temp, t))
-        await self._send([{"code": self._set_code, "value": t}])
-        self._attr_target_temperature = t
-        await self.async_update()
-        self.async_write_ha_state()
+        raw = self._to_device_raw(float(temp))
+        await self._send(self._code_set, raw)
+        await self.coordinator.async_request_refresh()
 
-    async def async_update(self) -> None:
-        """Poll device status via Tuya Cloud in executor."""
-        try:
-            res = await self.hass.async_add_executor_job(
-                self.api.get,
-                f"/v1.0/iot-03/devices/{self._device_id}/status")
-            if not res or not res.get("success"):
-                return
-            status = {
-                i.get("code"): i.get("value")
-                for i in (res.get("result") or [])
-                if isinstance(i, dict) and "code" in i
-            }
-            if self._cur_code and self._cur_code in status:
-                self._attr_current_temperature = status[self._cur_code]
-            if self._set_code in status:
-                self._attr_target_temperature = status[self._set_code]
-            if self._power_code and self._power_code in status:
-                self._attr_hvac_mode = (
-                    HVACMode.HEAT if bool(status[self._power_code]) else HVACMode.OFF
-                )
-        except Exception as e:
-            _LOGGER.warning("Tuya Cloud DP status error: %s", e)
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        if hvac_mode == HVACMode.OFF:
+            # Prefer power code if available; else map to Mode if supports off
+            if self._code_power:
+                await self._send(self._code_power, False)
+            elif self._code_mode:
+                await self._send(self._code_mode, "Holiday")  # safest non-heating placeholder
+            await self.coordinator.async_request_refresh()
+            return
 
-    async def _send(self, commands):
-        """Send commands via Tuya Cloud in executor."""
-        body = {"commands": commands}
-        try:
-            res = await self.hass.async_add_executor_job(
-                self.api.post,
-                f"/v1.0/iot-03/devices/{self._device_id}/commands", body)
-            if not res or not res.get("success"):
-                _LOGGER.error("Tuya command failed: %s", res)
-        except Exception as e:
-            _LOGGER.error("Tuya command exception: %s", e)
+        # Turning ON → Manual heat by default
+        if self._code_power:
+            await self._send(self._code_power, True)
+
+        if self._code_mode:
+            if hvac_mode == HVACMode.AUTO:
+                await self._send(self._code_mode, "Program")
+            else:
+                await self._send(self._code_mode, "Manual")
+
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_on(self) -> None:
+        if self._code_power:
+            await self._send(self._code_power, True)
+        elif self._code_mode:
+            await self._send(self._code_mode, "Manual")
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_off(self) -> None:
+        if self._code_power:
+            await self._send(self._code_power, False)
+        elif self._code_mode:
+            # Some devices support an explicit off via mode enum; if not, fallback to "Holiday"
+            await self._send(self._code_mode, "Holiday")
+        await self.coordinator.async_request_refresh()
+
+    # ---------- Supported features / ranges ----------
+
+    @property
+    def supported_features(self) -> int:
+        return self._attr_supported_features
+
+    @property
+    def min_temp(self) -> float:
+        return float(self._attr_min_temp or 5.0)
+
+    @property
+    def max_temp(self) -> float:
+        return float(self._attr_max_temp or 70.0)
+
+    # ---------- Availability ----------
+
+    @property
+    def available(self) -> bool:
+        # Consider entity available if last update succeeded
+        return self.coordinator.last_update_success
