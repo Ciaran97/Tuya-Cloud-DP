@@ -21,7 +21,7 @@ REGIONS = ["us","eu","in","cn"]
 STEP1_SCHEMA = vol.Schema({
     vol.Required(CONF_ACCESS_ID): str,
     vol.Required(CONF_ACCESS_SECRET): str,
-    vol.Required(CONF_REGION, default="us"): vol.In(REGIONS),
+    vol.Required(CONF_REGION, default="eu"): vol.In(REGIONS),
     vol.Optional(CONF_USER_CODE, default=""): str,  # from Tuya/Smart Life app
 })
 
@@ -49,8 +49,19 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if uc:
                 auth_res = await self.hass.async_add_executor_job(authorized_login_sync, api, uc)
                 if not auth_res or not auth_res.get("success"):
-                    return self.async_show_form(step_id="user", data_schema=STEP1_SCHEMA,
-                        errors={"base": "cannot_connect"})
+    # Get some kind of readable reason from Tuya
+                    err_detail = None
+                    if isinstance(auth_res, dict):
+                        err_detail = auth_res.get("msg") or auth_res.get("code") or str(auth_res)
+                    else:
+                        err_detail = str(auth_res)
+
+                    return self.async_show_form(
+                        step_id="user",
+                        data_schema=STEP1_SCHEMA,
+                        errors={"base": "cannot_connect"},
+                        description_placeholders={"err": err_detail or "Unknown error"}
+                    )
             # Discover devices like LocalTuya’s cloud step
             self._devices = await self.hass.async_add_executor_job(get_user_devices_sync, api)
             # Cache the api client on hass for later steps if you want, or reconnect later
