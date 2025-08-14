@@ -61,10 +61,13 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                     _LOGGER.warning(f"Tuya auth failed: {auth_res}")
 
+                    safe_err = "".join(c if c.isalnum() else "_" for c in (err_detail or "")).strip("_")
+                    error_key = f"cannot_connect_{safe_err}" if safe_err else "cannot_connect"
+
                     return self.async_show_form(
                         step_id="user",
                         data_schema=STEP1_SCHEMA,
-                        errors={"base": "cannot_connect"},
+                        errors={"base": error_key},
                         description_placeholders={"err": err_detail or "Unknown error"}
                     )
             # Discover devices like LocalTuya’s cloud step
