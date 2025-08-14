@@ -1,10 +1,13 @@
 # custom_components/tuya_cloud_dp/config_flow.py
 from __future__ import annotations
+import logging
 import voluptuous as vol
 from typing import Dict, Any
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
+
+_LOGGER = logging.getLogger(__name__)
 
 from .const import (
     DOMAIN, CONF_ACCESS_ID, CONF_ACCESS_SECRET, CONF_REGION, CONF_DEVICE_ID,
@@ -55,6 +58,8 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         err_detail = auth_res.get("msg") or auth_res.get("code") or str(auth_res)
                     else:
                         err_detail = str(auth_res)
+
+                    _LOGGER.warning(f"Tuya auth failed: {auth_res}")
 
                     return self.async_show_form(
                         step_id="user",
