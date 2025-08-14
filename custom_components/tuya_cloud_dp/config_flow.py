@@ -70,18 +70,47 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         errors={"base": error_key},
                         description_placeholders={"err": err_detail or "Unknown error"}
                     )
+                token = (auth_res.get("result") or {}).get("access_token")
+                if token:
+                    try:
+                        api.token_info = auth_res["result"]
+                    except Exception:
+                        pass
+                    try:
+                        api.session.headers["access_token"] = token
+                    except Exception:
+                        pass
+            # Connectivity probe to surface errors early
+            def _probe_time():
+                return api.get("/v1.0/time", None, None)
+            probe = await self.hass.async_add_executor_job(_probe_time)
+            if not probe or not probe.get("success"):
+                err_detail = str(probe)
+                _LOGGER.warning("Tuya /time probe failed: %s", err_detail)
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=STEP1_SCHEMA,
+                    errors={"base": "cannot_connect"},
+                    description_placeholders={"err": err_detail}
+                )
             # Discover devices like LocalTuya’s cloud step
             self._devices = await self.hass.async_add_executor_job(get_user_devices_sync, api)
             # Cache the api client on hass for later steps if you want, or reconnect later
             self.hass.data.setdefault(DOMAIN, {})["api_seed"] = (endpoint, user_input[CONF_ACCESS_ID], user_input[CONF_ACCESS_SECRET], uc)
         except Exception as e:
             _LOGGER.exception("Error during Tuya Cloud connection: %s", e)
-            return self.async_show_form(step_id="user", data_schema=STEP1_SCHEMA,
-                                        errors={"base": f"cannot_connect_{type(e).__name__}"})
+            return self.async_show_form(
+                step_id="user",
+                data_schema=STEP1_SCHEMA,
+                errors={"base": f"cannot_connect_{type(e).__name__}"},
+                description_placeholders={"err": str(e)}
+            )
 
         return await self.async_step_pick_device()
 
     async def async_step_pick_device(self, user_input=None) -> FlowResult:
+        if isinstance(self._devices, dict):
+            self._devices = self._devices.get("list") or []
         if not self._devices:
             # No devices — let user go back
             return self.async_abort(reason="no_devices")
