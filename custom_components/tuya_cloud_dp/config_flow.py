@@ -9,7 +9,7 @@ from homeassistant.data_entry_flow import FlowResult
 from .const import (
     DOMAIN, CONF_ACCESS_ID, CONF_ACCESS_SECRET, CONF_REGION, CONF_DEVICE_ID,
     CONF_SETPOINT_CODE, CONF_MODE_CODE, CONF_POWER_CODE, CONF_CURTEMP_CODE,
-    CONF_MIN_TEMP, CONF_MAX_TEMP, CONF_PRECISION, CONF_ENDPOINT, CONF_USER_CODE
+    CONF_MIN_TEMP, CONF_MAX_TEMP, CONF_PRECISION, CONF_USER_CODE
 )
 from .api import (
     resolve_endpoint, connect_sync, authorized_login_sync,
@@ -22,7 +22,6 @@ STEP1_SCHEMA = vol.Schema({
     vol.Required(CONF_ACCESS_ID): str,
     vol.Required(CONF_ACCESS_SECRET): str,
     vol.Required(CONF_REGION, default="us"): vol.In(REGIONS),
-    vol.Optional(CONF_ENDPOINT, default=""): str,   # leave blank normally
     vol.Optional(CONF_USER_CODE, default=""): str,  # from Tuya/Smart Life app
 })
 
@@ -40,7 +39,7 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # Save basic config and authenticate
         self._cfg = user_input
-        endpoint = resolve_endpoint(user_input.get(CONF_REGION), user_input.get(CONF_ENDPOINT) or None)
+        endpoint = resolve_endpoint(user_input.get(CONF_REGION))
 
         try:
             api = await self.hass.async_add_executor_job(
@@ -148,7 +147,7 @@ class TuyaCloudDPOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input=None) -> FlowResult:
         data = {**self.entry.data, **(self.entry.options or {})}
-        endpoint = resolve_endpoint(data.get(CONF_REGION), data.get(CONF_ENDPOINT) or None)
+        endpoint = resolve_endpoint(data.get(CONF_REGION))
         try:
             api = await self.hass.async_add_executor_job(connect_sync, endpoint, data[CONF_ACCESS_ID], data[CONF_ACCESS_SECRET])
             uc = (data.get(CONF_USER_CODE) or "").strip()

@@ -10,10 +10,8 @@ ENDPOINTS = {
     "cn": "https://openapi.tuyacn.com",
 }
 
-def resolve_endpoint(region: str, explicit: str | None = None) -> str:
-    if explicit:
-        return explicit.rstrip("/")
-    return ENDPOINTS.get((region or "us").lower(), ENDPOINTS["us"])
+def resolve_endpoint(region: str) -> str:
+    return ENDPOINTS.get((region or "eu").lower(), ENDPOINTS["eu"])
 
 def connect_sync(endpoint: str, access_id: str, access_secret: str) -> TuyaOpenAPI:
     api = TuyaOpenAPI(endpoint, access_id, access_secret)
