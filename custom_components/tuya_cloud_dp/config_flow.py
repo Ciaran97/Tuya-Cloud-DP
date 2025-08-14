@@ -8,6 +8,7 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.const import CONF_REGION, CONF_DEVICE_ID
+from homeassistant.helpers.selector import selector
 import logging
 
 from .const import DOMAIN
@@ -68,25 +69,37 @@ def _label(code: str, typ: Optional[str], cur: Any) -> str:
     t = typ or "unknown"
     return f"{code} (type:{t}, current:{cur_s})"
 
-def _dp_schema(spec_map: Dict[str, Dict[str, Any]], status_map: Dict[str, Any], defaults: Optional[Dict[str, Any]] = None) -> vol.Schema:
+def _dp_schema(spec_map, status_map, defaults=None) -> vol.Schema:
     defaults = defaults or {}
-    def t(v): return (v.get("type") or "").lower()
-    nums = [c for c,v in spec_map.items() if t(v) in ("integer","float","value")]
-    bls  = [c for c,v in spec_map.items() if t(v) == "bool"]
-    ens  = [c for c,v in spec_map.items() if t(v) == "enum"]
 
-    num_map  = { _label(c, spec_map[c].get("type"), status_map.get(c)): c for c in nums }
-    cur_map  = {"(none)": ""} | num_map
-    pow_map  = {"(none)": ""} | { _label(c, spec_map[c].get("type"), status_map.get(c)): c for c in bls }
-    mode_map = {"(none)": ""} | { _label(c, spec_map[c].get("type"), status_map.get(c)): c for c in ens }
+    def t(v): return (v.get("type") or "").lower()
+    nums = [c for c, v in spec_map.items() if t(v) in ("integer", "float", "value")]
+    bls  = [c for c, v in spec_map.items() if t(v) == "bool"]
+    ens  = [c for c, v in spec_map.items() if t(v) == "enum"]
+
+    def opt_list(codes):
+        return [{"value": c, "label": _label(c, spec_map[c].get("type"), status_map.get(c))} for c in codes]
+
+    num_opts  = opt_list(nums)
+    bool_opts = opt_list(bls)
+    enum_opts = opt_list(ens)
+
+    # ensure "(none)" is a selectable option for optional fields
+    none_opt = {"value": "", "label": "(none)"}
 
     default_set = defaults.get(CONF_SETPOINT_CODE, (nums[0] if nums else ""))
 
+    # Build selectors
+    setpoint_sel = selector({"select": {"options": (num_opts or [{"value": "", "label": "(no numeric DPs)"}]), "mode": "dropdown"}})
+    curtemp_sel  = selector({"select": {"options": [none_opt] + num_opts, "mode": "dropdown"}})
+    power_sel    = selector({"select": {"options": [none_opt] + bool_opts, "mode": "dropdown"}})
+    mode_sel     = selector({"select": {"options": [none_opt] + enum_opts, "mode": "dropdown"}})
+
     return vol.Schema({
-        vol.Required(CONF_SETPOINT_CODE, default=default_set): vol.In(num_map or {"(no numeric DPs)": ""}),
-        vol.Optional(CONF_CURTEMP_CODE,  default=defaults.get(CONF_CURTEMP_CODE,"")): vol.In(cur_map),
-        vol.Optional(CONF_POWER_CODE,    default=defaults.get(CONF_POWER_CODE,"")):   vol.In(pow_map),
-        vol.Optional(CONF_MODE_CODE,     default=defaults.get(CONF_MODE_CODE,"")):    vol.In(mode_map),
+        vol.Required(CONF_SETPOINT_CODE, default=default_set): setpoint_sel,
+        vol.Optional(CONF_CURTEMP_CODE,  default=defaults.get(CONF_CURTEMP_CODE, "")):  curtemp_sel,
+        vol.Optional(CONF_POWER_CODE,    default=defaults.get(CONF_POWER_CODE, "")):    power_sel,
+        vol.Optional(CONF_MODE_CODE,     default=defaults.get(CONF_MODE_CODE, "")):     mode_sel,
         vol.Optional(CONF_MIN_TEMP, default=5):  vol.Coerce(float),
         vol.Optional(CONF_MAX_TEMP, default=35): vol.Coerce(float),
         vol.Optional(CONF_PRECISION, default=1.0): vol.In([0.5, 1.0]),
