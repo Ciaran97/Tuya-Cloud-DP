@@ -19,18 +19,17 @@ def connect_sync(endpoint: str, access_id: str, access_secret: str) -> TuyaOpenA
     return api
 
 def authorized_login_sync(api: TuyaOpenAPI, user_code: str) -> Dict[str, Any]:
-    return api.post("/v1.0/iot-01/associated-users/actions/authorized-login",
-                    {"user_code": user_code}, None)
+    return api.post("/v1.0/iot-01/associated-users/actions/authorized-login", {"user_code": user_code})
 
 def get_user_devices_sync(api: TuyaOpenAPI) -> List[Dict[str, Any]]:
     """Return list of devices associated with the authorized user."""
-    res = api.get("/v1.0/iot-01/associated-users/devices", None, None)
+    res = api.get("/v1.0/iot-01/associated-users/devices", params={"page_no": 1, "page_size": 100})
     if not res or not res.get("success"):
         return []
     return res.get("result") or []
 
 def get_status_sync(api: TuyaOpenAPI, device_id: str) -> Dict[str, Any]:
-    res = api.get(f"/v1.0/iot-03/devices/{device_id}/status", None, None)
+    res = api.get(f"/v1.0/iot-03/devices/{device_id}/status")
     out = {}
     if res and res.get("success"):
         for item in (res.get("result") or []):
@@ -40,7 +39,7 @@ def get_status_sync(api: TuyaOpenAPI, device_id: str) -> Dict[str, Any]:
     return out
 
 def get_spec_sync(api: TuyaOpenAPI, device_id: str) -> Dict[str, Dict[str, Any]]:
-    res = api.get(f"/v1.0/iot-03/devices/{device_id}/specifications", None, None)
+    res = api.get(f"/v1.0/iot-03/devices/{device_id}/specifications")
     out: Dict[str, Dict[str, Any]] = {}
     if res and res.get("success"):
         for f in (res.get("result", {}).get("functions") or []):

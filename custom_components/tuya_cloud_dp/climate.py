@@ -132,10 +132,7 @@ class TuyaDPClimate(ClimateEntity):
         try:
             res = await self.hass.async_add_executor_job(
                 self.api.get,
-                f"/v1.0/iot-03/devices/{self._device_id}/status",
-                None,
-                None,
-            )
+                f"/v1.0/iot-03/devices/{self._device_id}/status")
             if not res or not res.get("success"):
                 return
             status = {
@@ -160,10 +157,7 @@ class TuyaDPClimate(ClimateEntity):
         try:
             res = await self.hass.async_add_executor_job(
                 self.api.post,
-                f"/v1.0/iot-03/devices/{self._device_id}/commands",
-                body,
-                None,
-            )
+                f"/v1.0/iot-03/devices/{self._device_id}/commands", body)
             if not res or not res.get("success"):
                 _LOGGER.error("Tuya command failed: %s", res)
         except Exception as e:

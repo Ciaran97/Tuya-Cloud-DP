@@ -82,7 +82,7 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         pass
             # Connectivity probe to surface errors early
             def _probe_time():
-                return api.get("/v1.0/time", None, None)
+                return api.get("/v1.0/time")
             probe = await self.hass.async_add_executor_job(_probe_time)
             if not probe or not probe.get("success"):
                 err_detail = str(probe)
