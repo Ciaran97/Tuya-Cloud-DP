@@ -74,9 +74,10 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._devices = await self.hass.async_add_executor_job(get_user_devices_sync, api)
             # Cache the api client on hass for later steps if you want, or reconnect later
             self.hass.data.setdefault(DOMAIN, {})["api_seed"] = (endpoint, user_input[CONF_ACCESS_ID], user_input[CONF_ACCESS_SECRET], uc)
-        except Exception:
+        except Exception as e:
+            _LOGGER.exception("Error during Tuya Cloud connection: %s", e)
             return self.async_show_form(step_id="user", data_schema=STEP1_SCHEMA,
-                                        errors={"base": "cannot_connect"})
+                                        errors={"base": f"cannot_connect_{type(e).__name__}"})
 
         return await self.async_step_pick_device()
 
