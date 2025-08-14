@@ -11,7 +11,7 @@ from homeassistant.const import CONF_REGION, CONF_DEVICE_ID
 import logging
 
 from .const import DOMAIN
-from .cloud_api import TuyaCloudApi
+from .api import TuyaCloudApi
 
 _LOGGER = logging.getLogger(__name__)
 
