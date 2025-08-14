@@ -1,4 +1,4 @@
-"""Ultra-minimal Tuya Cloud API used only by the config/option flows."""
+"""Ultra-minimal Tuya Cloud API for UID-based (LocalTuya-style) flow."""
 from __future__ import annotations
 
 import hashlib
@@ -38,7 +38,7 @@ class TuyaCloudApi:
     def _headers(self, method: str, path: str, body: Optional[str]) -> Dict[str, str]:
         t = str(int(time.time() * 1000))
         content_sha = hashlib.sha256((body or "").encode("utf-8")).hexdigest()
-        # Canonical string per Tuya spec (no Signature-Headers)
+        # Canonical string per Tuya OpenAPI v2 (no Signature-Headers used)
         payload = f"{self._id}{self._token}{t}{method}\n{content_sha}\n\n/{path.lstrip('/')}"
         headers = {
             "t": t,
@@ -48,12 +48,17 @@ class TuyaCloudApi:
         }
         if self._token:
             headers["access_token"] = self._token
-        # be explicit for POSTs
         if method == "POST":
             headers["Content-Type"] = "application/json"
         return headers
 
-    async def _req(self, method: str, path: str, params: Optional[Dict[str, Any]] = None, body_obj: Optional[Dict[str, Any]] = None):
+    async def _req(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        body_obj: Optional[Dict[str, Any]] = None,
+    ):
         body = json.dumps(body_obj) if body_obj is not None else None
         hdrs = self._headers(method, path, body)
         url = f"{self._endpoint}/{path.lstrip('/')}"
@@ -65,10 +70,9 @@ class TuyaCloudApi:
             raise ValueError("Unsupported method")
         return await self._hass.async_add_executor_job(_do)
 
-    # ---- Auth ----
-
+    # ---- Auth (project token) ----
     async def grant_type_1(self) -> str:
-        """Project token (needed before user auth)."""
+        """Project token (no user-code)."""
         r = await self._req("GET", "/v1.0/token", params={"grant_type": 1})
         if not r.ok:
             return f"HTTP {r.status_code}"
@@ -79,43 +83,15 @@ class TuyaCloudApi:
         _LOGGER.debug("grant_type_1 OK (endpoint=%s)", self._endpoint)
         return "ok"
 
-    async def authorized_login_user_code(self, user_code: str) -> str:
-        """Official associated-user login using a user_code from the app."""
-        r = await self._req(
-            "POST",
-            "/v1.0/iot-01/associated-users/actions/authorized-login",
-            body_obj={"user_code": user_code},
-        )
+    # ---- Device list for a linked app account (UID) ----
+    async def list_devices_for_uid(self, user_id: str) -> Dict[str, Any]:
+        r = await self._req("GET", f"/v1.0/users/{user_id}/devices")
         if not r.ok:
-            return f"HTTP {r.status_code}"
-        j = r.json()
-        if not j.get("success"):
-            return f"Error {j.get('code')}: {j.get('msg')}"
-        self._token = (j.get("result") or {}).get("access_token", "")
-        _LOGGER.debug("authorized-login OK (endpoint=%s)", self._endpoint)
-        return "ok"
-
-    async def exchange_user_code(self, user_code: str) -> str:
-        """Fallback: QR/User Code → user-bound token via grant_type=2."""
-        r = await self._req("GET", "/v1.0/token", params={"grant_type": 2, "code": user_code})
-        if not r.ok:
-            return f"HTTP {r.status_code}"
-        j = r.json()
-        if not j.get("success"):
-            return f"Error {j.get('code')}: {j.get('msg')}"
-        self._token = (j.get("result") or {}).get("access_token", "")
-        _LOGGER.debug("exchange_user_code OK (endpoint=%s)", self._endpoint)
-        return "ok"
-
-    # ---- API calls ----
-
-    async def list_devices(self) -> Dict[str, Any]:
-        r = await self._req("GET", "/v1.0/iot-01/associated-users/devices", params={"page_no": 1, "page_size": 100})
-        if not r.ok:
-            _LOGGER.warning("list_devices HTTP error %s (endpoint=%s)", r.status_code, self._endpoint)
+            _LOGGER.warning("list_devices_for_uid HTTP error %s (endpoint=%s)", r.status_code, self._endpoint)
             return {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}
         return r.json()
 
+    # ---- Spec / Status (for DP mapping) ----
     async def device_spec(self, device_id: str) -> Dict[str, Any]:
         r = await self._req("GET", f"/v1.0/iot-03/devices/{device_id}/specifications")
         return r.json() if r.ok else {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}

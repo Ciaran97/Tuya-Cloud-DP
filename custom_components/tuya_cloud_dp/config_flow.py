@@ -1,4 +1,4 @@
-"""Config flow for Tuya Cloud DP Climate (minimal)."""
+"""Config flow for Tuya Cloud DP Climate (UID-based, LocalTuya-style)."""
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, List
@@ -15,15 +15,10 @@ from .cloud_api import TuyaCloudApi
 
 _LOGGER = logging.getLogger(__name__)
 
-
-def _error_schema(msg: str) -> vol.Schema:
-    # read-only-ish display of the error message
-    return STEP1_SCHEMA.extend({ vol.Optional("error_detail", default=str(msg)): str })
-
-# Minimal inputs
-CONF_ACCESS_ID = "access_id"
+# Minimal inputs (match LocalTuya cloud style)
+CONF_ACCESS_ID     = "access_id"
 CONF_ACCESS_SECRET = "access_secret"
-CONF_USER_CODE = "user_code"
+CONF_USER_ID       = "user_id"   # UID from "Link Tuya App Account" in Tuya IoT console
 
 # DP mapping
 CONF_SETPOINT_CODE = "setpoint_code"
@@ -40,7 +35,7 @@ STEP1_SCHEMA = vol.Schema({
     vol.Required(CONF_REGION, default="us"): vol.In(REGIONS),
     vol.Required(CONF_ACCESS_ID): str,
     vol.Required(CONF_ACCESS_SECRET): str,
-    vol.Required(CONF_USER_CODE): str,  # from Tuya/Smart Life app
+    vol.Required(CONF_USER_ID): str,  # UID (linked app account)
 })
 
 def _readable(x) -> str:
@@ -97,6 +92,10 @@ def _dp_schema(spec_map: Dict[str, Dict[str, Any]], status_map: Dict[str, Any], 
         vol.Optional(CONF_PRECISION, default=1.0): vol.In([0.5, 1.0]),
     })
 
+def _error_schema(msg: str) -> vol.Schema:
+    # add a read-only-ish field to display the actual error reason
+    return STEP1_SCHEMA.extend({ vol.Optional("error_detail", default=str(msg)): str })
+
 class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
@@ -112,71 +111,54 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         try:
             self._cfg1 = dict(user_input)
-            region_selected = user_input[CONF_REGION]
-            access_id = user_input[CONF_ACCESS_ID]
-            access_secret = user_input[CONF_ACCESS_SECRET]
-            user_code = user_input[CONF_USER_CODE].strip()
+            region = user_input[CONF_REGION]
+            aid    = user_input[CONF_ACCESS_ID]
+            sec    = user_input[CONF_ACCESS_SECRET]
+            uid    = user_input[CONF_USER_ID].strip()
 
-            # Try selected region first, then the other of (us, eu)
-            region_order = [region_selected] + ([r for r in ("us","eu") if r != region_selected] if region_selected in ("us","eu") else ["us","eu"])
-
+            # Try selected region, then the other of (us, eu) as a fallback
+            region_order = [region] + ([r for r in ("us","eu") if r != region] if region in ("us","eu") else ["us","eu"])
             last_err = None
             api = None
-            for region in region_order:
-                try:
-                    # inside async_step_user, replace the region loop body with:
-                    api = TuyaCloudApi(self.hass, region, access_id, access_secret)
 
+            for rgn in region_order:
+                try:
+                    api = TuyaCloudApi(self.hass, rgn, aid, sec)
                     res = await api.grant_type_1()
                     if res != "ok":
                         last_err = res
+                        api = None
                         continue
 
-                    # 1) Try official associated-user login (required for associated-users/*)
-                    res2 = await api.authorized_login_user_code(user_code)
-                    if res2 != "ok":
-                        # 2) Fallback to grant_type=2 exchange for environments that expect it
-                        res2 = await api.exchange_user_code(user_code)
-                        if res2 != "ok":
-                            last_err = res2
-                            continue
+                    devs = await api.list_devices_for_uid(uid)
+                    if not devs or not devs.get("success"):
+                        last_err = devs
+                        api = None
+                        continue
 
-                    # success on this region
-                    self._cfg1[CONF_REGION] = region
+                    # success
+                    self._cfg1[CONF_REGION] = rgn
+                    result = devs.get("result")
+                    if isinstance(result, list):
+                        self._devices = result
+                    else:
+                        self._devices = result or []
                     break
                 except Exception as e:
-                    last_err = str(e)
                     api = None
+                    last_err = str(e)
 
             if api is None:
-                # Show the real reason in a field
                 return self.async_show_form(
                     step_id="user",
-                    data_schema=_error_schema(last_err or "unknown"),
+                    data_schema=_error_schema(_readable(last_err or "unknown")),
                     errors={"base": "cannot_connect"},
                 )
-
-            # Device list
-            devs = await api.list_devices()
-            if not devs or not devs.get("success"):
-                return self.async_show_form(
-                    step_id="user",
-                    data_schema=_error_schema(devs),
-                    errors={"base": "no_devices"},
-                )
-
-            result = devs.get("result")
-            if isinstance(result, list):
-                self._devices = result
-            elif isinstance(result, dict):
-                self._devices = result.get("list") or []
-            else:
-                self._devices = []
 
             if not self._devices:
                 return self.async_show_form(
                     step_id="user",
-                    data_schema=_error_schema("0 devices returned"),
+                    data_schema=_error_schema("0 devices for this UID (check link/region)"),
                     errors={"base": "no_devices"},
                 )
 
@@ -209,21 +191,18 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         self._cfg1[CONF_DEVICE_ID] = user_input[CONF_DEVICE_ID]
 
-        # Fetch spec/status for DP selector
+        # Fetch spec/status to build DP dropdowns
         try:
             api = TuyaCloudApi(self.hass, self._cfg1[CONF_REGION], self._cfg1[CONF_ACCESS_ID], self._cfg1[CONF_ACCESS_SECRET])
             if await api.grant_type_1() != "ok":
-                return self._err_form("pick_device", "cannot_connect", "grant_type_1 failed")
-            if await api.exchange_user_code(self._cfg1[CONF_USER_CODE].strip()) != "ok":
-                return self._err_form("pick_device", "cannot_connect", "user_code exchange failed")
-
+                return self.async_show_form(step_id="pick_device", data_schema=schema, errors={"base": "cannot_connect"})
             spec = await api.device_spec(self._cfg1[CONF_DEVICE_ID])
             status = await api.device_status(self._cfg1[CONF_DEVICE_ID])
             self._spec = _extract_spec(spec)
             self._status = _extract_status(status)
         except Exception as e:
             _LOGGER.exception("pick_device failed: %s", e)
-            return self._err_form("pick_device", "unknown", e)
+            return self.async_show_form(step_id="pick_device", data_schema=schema, errors={"base": "unknown"})
 
         return await self.async_step_map_dp()
 
@@ -238,14 +217,6 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         title = f"Tuya Cloud DP ({data.get(CONF_DEVICE_ID)})"
         return self.async_create_entry(title=title, data=data)
 
-    def _err_form(self, step_id: str, base: str, detail: Any) -> FlowResult:
-        return self.async_show_form(
-            step_id=step_id,
-            data_schema=STEP1_SCHEMA if step_id == "user" else vol.Schema({CONF_DEVICE_ID: str}),
-            errors={"base": base},
-            description_placeholders={"msg": _readable(detail)},
-        )
-
     @callback
     def async_get_options_flow(self, entry: config_entries.ConfigEntry):
         return TuyaCloudDPOptionsFlow(entry)
@@ -257,12 +228,10 @@ class TuyaCloudDPOptionsFlow(config_entries.OptionsFlow):
         self._status: Dict[str, Any] = {}
 
     async def async_step_init(self, user_input=None) -> FlowResult:
-        # Minimal options: just re-offer the DP dropdowns with current values
         from .cloud_api import TuyaCloudApi  # lazy import
         data = {**self.entry.data, **(self.entry.options or {})}
         api = TuyaCloudApi(self.hass, data[CONF_REGION], data[CONF_ACCESS_ID], data[CONF_ACCESS_SECRET])
         if await api.grant_type_1() == "ok":
-            await api.exchange_user_code(data[CONF_USER_CODE].strip())
             self._spec = _extract_spec(await api.device_spec(data[CONF_DEVICE_ID]))
             self._status = _extract_status(await api.device_status(data[CONF_DEVICE_ID]))
 
