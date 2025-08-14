@@ -38,15 +38,20 @@ class TuyaCloudApi:
     def _headers(self, method: str, path: str, body: Optional[str]) -> Dict[str, str]:
         t = str(int(time.time() * 1000))
         content_sha = hashlib.sha256((body or "").encode("utf-8")).hexdigest()
-        # No Signature-Headers; canonical string per Tuya spec (OpenAPI v2)
+        # Canonical string per Tuya spec (no Signature-Headers)
         payload = f"{self._id}{self._token}{t}{method}\n{content_sha}\n\n/{path.lstrip('/')}"
-        return {
+        headers = {
             "t": t,
             "client_id": self._id,
             "sign_method": "HMAC-SHA256",
             "sign": _sign(payload, self._secret),
-            **({"access_token": self._token} if self._token else {}),
         }
+        if self._token:
+            headers["access_token"] = self._token
+        # be explicit for POSTs
+        if method == "POST":
+            headers["Content-Type"] = "application/json"
+        return headers
 
     async def _req(self, method: str, path: str, params: Optional[Dict[str, Any]] = None, body_obj: Optional[Dict[str, Any]] = None):
         body = json.dumps(body_obj) if body_obj is not None else None
@@ -60,8 +65,10 @@ class TuyaCloudApi:
             raise ValueError("Unsupported method")
         return await self._hass.async_add_executor_job(_do)
 
+    # ---- Auth ----
+
     async def grant_type_1(self) -> str:
-        """Project token (needed before user-code)."""
+        """Project token (needed before user auth)."""
         r = await self._req("GET", "/v1.0/token", params={"grant_type": 1})
         if not r.ok:
             return f"HTTP {r.status_code}"
@@ -72,8 +79,24 @@ class TuyaCloudApi:
         _LOGGER.debug("grant_type_1 OK (endpoint=%s)", self._endpoint)
         return "ok"
 
+    async def authorized_login_user_code(self, user_code: str) -> str:
+        """Official associated-user login using a user_code from the app."""
+        r = await self._req(
+            "POST",
+            "/v1.0/iot-01/associated-users/actions/authorized-login",
+            body_obj={"user_code": user_code},
+        )
+        if not r.ok:
+            return f"HTTP {r.status_code}"
+        j = r.json()
+        if not j.get("success"):
+            return f"Error {j.get('code')}: {j.get('msg')}"
+        self._token = (j.get("result") or {}).get("access_token", "")
+        _LOGGER.debug("authorized-login OK (endpoint=%s)", self._endpoint)
+        return "ok"
+
     async def exchange_user_code(self, user_code: str) -> str:
-        """QR/User Code → user-bound token."""
+        """Fallback: QR/User Code → user-bound token via grant_type=2."""
         r = await self._req("GET", "/v1.0/token", params={"grant_type": 2, "code": user_code})
         if not r.ok:
             return f"HTTP {r.status_code}"
@@ -84,12 +107,14 @@ class TuyaCloudApi:
         _LOGGER.debug("exchange_user_code OK (endpoint=%s)", self._endpoint)
         return "ok"
 
+    # ---- API calls ----
+
     async def list_devices(self) -> Dict[str, Any]:
-        """Associated user’s devices (no user_id required)."""
         r = await self._req("GET", "/v1.0/iot-01/associated-users/devices", params={"page_no": 1, "page_size": 100})
         if not r.ok:
             _LOGGER.warning("list_devices HTTP error %s (endpoint=%s)", r.status_code, self._endpoint)
-        return r.json() if r.ok else {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}
+            return {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}
+        return r.json()
 
     async def device_spec(self, device_id: str) -> Dict[str, Any]:
         r = await self._req("GET", f"/v1.0/iot-03/devices/{device_id}/specifications")

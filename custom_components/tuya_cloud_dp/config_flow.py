@@ -124,15 +124,23 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             api = None
             for region in region_order:
                 try:
+                    # inside async_step_user, replace the region loop body with:
                     api = TuyaCloudApi(self.hass, region, access_id, access_secret)
+
                     res = await api.grant_type_1()
                     if res != "ok":
                         last_err = res
                         continue
-                    res2 = await api.exchange_user_code(user_code)
+
+                    # 1) Try official associated-user login (required for associated-users/*)
+                    res2 = await api.authorized_login_user_code(user_code)
                     if res2 != "ok":
-                        last_err = res2
-                        continue
+                        # 2) Fallback to grant_type=2 exchange for environments that expect it
+                        res2 = await api.exchange_user_code(user_code)
+                        if res2 != "ok":
+                            last_err = res2
+                            continue
+
                     # success on this region
                     self._cfg1[CONF_REGION] = region
                     break
