@@ -1,7 +1,7 @@
 {
   "domain": "tuya_cloud_dp",
   "name": "Tuya Cloud DP Climate",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "documentation": "https://developer.tuya.com",
   "requirements": ["tuya-iot-py-sdk==0.6.6"],
   "codeowners": [],

@@ -38,7 +38,7 @@ class TuyaCloudApi:
     def _headers(self, method: str, path: str, body: Optional[str]) -> Dict[str, str]:
         t = str(int(time.time() * 1000))
         content_sha = hashlib.sha256((body or "").encode("utf-8")).hexdigest()
-        # No Signature-Headers used; canonical string per Tuya spec
+        # No Signature-Headers; canonical string per Tuya spec (OpenAPI v2)
         payload = f"{self._id}{self._token}{t}{method}\n{content_sha}\n\n/{path.lstrip('/')}"
         return {
             "t": t,
@@ -81,10 +81,6 @@ class TuyaCloudApi:
             return f"Error {j.get('code')}: {j.get('msg')}"
         self._token = (j.get("result") or {}).get("access_token", "")
         return "ok"
-
-    async def time_probe(self) -> Dict[str, Any]:
-        r = await self._req("GET", "/v1.0/time")
-        return r.json() if r.ok else {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}
 
     async def list_devices(self) -> Dict[str, Any]:
         """Associated user’s devices (no user_id required)."""
