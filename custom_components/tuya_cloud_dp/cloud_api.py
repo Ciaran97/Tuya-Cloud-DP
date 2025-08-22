@@ -80,7 +80,7 @@ class TuyaCloudApi:
         if not j.get("success"):
             return f"Error {j.get('code')}: {j.get('msg')}"
         self._token = (j.get("result") or {}).get("access_token", "")
-        _LOGGER.debug("grant_type_1 OK (endpoint=%s)", self._endpoint)
+        #_LOGGER.debug("grant_type_1 OK (endpoint=%s)", self._endpoint)
         return "ok"
 
     # ---- Device list for a linked app account (UID) ----
@@ -91,16 +91,43 @@ class TuyaCloudApi:
             return {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}
         return r.json()
 
-    # ---- Spec / Status (for DP mapping) ----
     async def device_spec(self, device_id: str) -> Dict[str, Any]:
-        r = await self._req("GET", f"/v1.0/iot-03/devices/{device_id}/specifications")
+        r = await self._req("GET", f"/v1.0/devices/{device_id}/specifications")
         return r.json() if r.ok else {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}
 
     async def device_functions(self, device_id: str) -> Dict[str, Any]:
         # Some tenants expose writable functions here (sometimes richer than /specifications)
-        r = await self._req("GET", f"/v1.0/iot-03/devices/{device_id}/functions")
+        r = await self._req("GET", f"/v1.0/devices/{device_id}/functions")
         return r.json() if r.ok else {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}
 
     async def device_status(self, device_id: str) -> Dict[str, Any]:
-        r = await self._req("GET", f"/v1.0/iot-03/devices/{device_id}/status")
+        r = await self._req("GET", f"/v1.0/devices/{device_id}/status")
         return r.json() if r.ok else {"success": False, "code": "http", "msg": f"HTTP {r.status_code}"}
+
+    async def send_command(self, device_id: str, commands: list[dict[str, Any]]):
+        """Send a command to a device via Tuya OpenAPI. Expects commands like: [{"code": "temp_set", "value": 215}]"""
+        # Primary (iot-03) endpoint
+        #_LOGGER.debug("Sending Command: %s: ", str(commands))
+        resp = await self._req(
+            "POST",
+            f"/v1.0/iot-03/devices/{device_id}/commands",
+            body_obj={"commands": commands},
+        )
+        try:
+            j = resp.json()
+        except Exception:
+            j = {"success": False, "code": "http", "msg": f"HTTP {resp.status_code}"}
+
+        # Optional fallback: if project isn’t asset-bound yet (1106), try legacy path
+        if not j.get("success") and str(j.get("code")) == "1106":
+            resp2 = await self._req(
+                "POST",
+                f"/v1.0/devices/{device_id}/commands",
+                body_obj={"commands": commands},
+            )
+            try:
+                j = resp2.json()
+            except Exception:
+                j = {"success": False, "code": "http", "msg": f"HTTP {resp2.status_code}"}
+
+        return j

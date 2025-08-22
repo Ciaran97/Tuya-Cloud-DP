@@ -257,23 +257,34 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
     async def async_step_pick_device(self, user_input=None) -> FlowResult:
-        choices: Dict[str, str] = {}
+        options = []
+        self._device_index = {}
         for d in self._devices:
             did = d.get("id") or d.get("device_id")
             if not did:
                 continue
             name = d.get("name") or "Unnamed"
             prod = d.get("product_name") or d.get("category") or ""
-            choices[f"{name} · {prod} · {did}"] = did
+            label = f"{did} · {name} · {prod}"
+            options.append({"value": did, "label": label})
+            self._device_index[did] = d
 
-        if not choices:
+        if not options:
             return self.async_abort(reason="no_devices")
 
-        schema = vol.Schema({ vol.Required(CONF_DEVICE_ID): vol.In(choices) })
+        sel = selector({"select": {"options": options, "mode": "dropdown"}})
+        schema = vol.Schema({ vol.Required(CONF_DEVICE_ID): sel })
+
+
         if user_input is None:
             return self.async_show_form(step_id="pick_device", data_schema=schema)
 
-        self._cfg1[CONF_DEVICE_ID] = user_input[CONF_DEVICE_ID]
+        device_id = user_input.get(CONF_DEVICE_ID)
+
+        if isinstance(device_id, str) and " · " in device_id:
+            device_id = device_id.rsplit(" · ", 1)[-1].strip()
+
+        self._cfg1[CONF_DEVICE_ID] = device_id
 
         # Fetch spec/status to build DP dropdowns
                 # Fetch functions/spec/status to build DP dropdowns (union, with live values)
@@ -289,8 +300,11 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             # Try both sources for functions; some tenants only fill one of them
             fx = await api.device_functions(self._cfg1[CONF_DEVICE_ID])
+
             spec = await api.device_spec(self._cfg1[CONF_DEVICE_ID])
+
             status = await api.device_status(self._cfg1[CONF_DEVICE_ID])
+
 
             funcs_map = _merge_functions(fx, spec)  # writable commands live here
             status_map = _extract_status_map(status)
@@ -301,7 +315,8 @@ class TuyaCloudDPConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._status = status_map
 
             # Tiny debug so we can see counts in HA logs if needed
-            _LOGGER.debug("DP build: functions=%d status=%d", len(self._spec), len(self._status))
+
+            return await self.async_step_map_dp()
 
         except Exception as e:
             _LOGGER.exception("pick_device fetch failed: %s", e)
