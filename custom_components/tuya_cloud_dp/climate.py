@@ -28,7 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 DOMAIN = "tuya_cloud_dp"
 
 SCAN_INTERVAL = timedelta(seconds=10)
-TUYA_TOKEN_ERRS = {"1010", "1011"}  # invalid/expired
+TUYA_TOKEN_ERRS = {"1010", "1011", "1004"}  # invalid/expired
 
 
 # Config-entry keys we expect (ensure your config_flow stores these exact keys)
