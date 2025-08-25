@@ -81,11 +81,16 @@ class TuyaCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self._token_ready = False
 
     async def _ensure_token(self) -> None:
-        if not self._token_ready:
+        # refresh if missing or within 60s of expiry
+        now_ms = int(time.time() * 1000)
+        need = (not getattr(self._api, "_token", "")) or (
+            getattr(self._api, "_token_expire_ms", 0) and
+            now_ms >= self._api._token_expire_ms - 60_000
+        )
+        if need:
             res = await self._api.grant_type_1()
             if res != "ok":
                 raise UpdateFailed(f"token: {res}")
-            self._token_ready = True
 
     async def _fetch_status_once(self) -> Dict[str, Any]:
         await self._ensure_token()

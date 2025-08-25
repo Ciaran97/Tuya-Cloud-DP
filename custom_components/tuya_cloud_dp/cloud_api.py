@@ -52,23 +52,68 @@ class TuyaCloudApi:
             headers["Content-Type"] = "application/json"
         return headers
 
-    async def _req(
-        self,
-        method: str,
-        path: str,
-        params: Optional[Dict[str, Any]] = None,
-        body_obj: Optional[Dict[str, Any]] = None,
-    ):
-        body = json.dumps(body_obj) if body_obj is not None else None
-        hdrs = self._headers(method, path, body)
-        url = f"{self._endpoint}/{path.lstrip('/')}"
+    async def _req(self, method: str, path: str, *, params=None, body_obj=None):
+        # Build path+query deterministically and use it for BOTH signing and the actual URL
+        qs = urllib.parse.urlencode(params or {}, doseq=True)
+        path_with_query = path if not qs else f"{path}?{qs}"
+
+        body = json.dumps(body_obj) if body_obj is not None else ""
+        include_token = not (method.upper() == "GET" and path.startswith("/v1.0/token"))
+
+        # Optional but recommended nonce
+        nonce = uuid.uuid4().hex
+
+        headers = self._signed_headers(
+            method,
+            path_with_query,
+            body if method.upper() != "GET" else "",
+            include_token,
+        )
+        headers["nonce"] = nonce
+
+        url = f"{self._endpoint}{path_with_query}"
+        _LOGGER.debug("Tuya request: %s %s", method, path_with_query)
+
         def _do():
-            if method == "GET":
-                return requests.get(url, headers=hdrs, timeout=30)
-            if method == "POST":
-                return requests.post(url, headers=hdrs, params=params, data=body, timeout=30)
-            raise ValueError("Unsupported method")
-        return await self._hass.async_add_executor_job(_do)
+            if method.upper() == "GET":
+                return requests.get(url, headers=headers)
+            if method.upper() == "POST":
+                return requests.post(url, headers=headers, data=body)
+            if method.upper() == "PUT":
+                return requests.put(url, headers=headers, data=body)
+            raise ValueError(f"Unsupported method {method}")
+
+        # First attempt
+        resp = await self._hass.async_add_executor_job(_do)
+        try:
+            j = resp.json()
+        except Exception:
+            j = {"success": False, "code": "http", "msg": f"HTTP {resp.status_code}"}
+        _LOGGER.debug("Tuya response (%s %s): %s", method, path_with_query, json.dumps(j, ensure_ascii=False))
+
+        # If sign invalid (1004), clear token, refresh, and retry once
+        if isinstance(j, dict) and str(j.get("code")) == "1004" and not path.startswith("/v1.0/token"):
+            self._token = ""
+            self._token_expire_ms = 0
+            # refresh token
+            gt = await self.grant_type_1()
+            if gt == "ok":
+                # re-sign with new token and resend
+                headers = self._signed_headers(
+                    method,
+                    path_with_query,
+                    body if method.upper() != "GET" else "",
+                    True,
+                )
+                headers["nonce"] = uuid.uuid4().hex
+                resp = await self._hass.async_add_executor_job(_do)
+                try:
+                    j = resp.json()
+                except Exception:
+                    j = {"success": False, "code": "http", "msg": f"HTTP {resp.status_code}"}
+                _LOGGER.debug("Tuya retry response (%s %s): %s", method, path_with_query, json.dumps(j, ensure_ascii=False))
+
+        return resp
 
     # ---- Auth (project token) ----
     async def grant_type_1(self) -> str:
@@ -79,8 +124,12 @@ class TuyaCloudApi:
         j = r.json()
         if not j.get("success"):
             return f"Error {j.get('code')}: {j.get('msg')}"
-        self._token = (j.get("result") or {}).get("access_token", "")
-        #_LOGGER.debug("grant_type_1 OK (endpoint=%s)", self._endpoint)
+        res = j.get("result") or {}
+        self._token = res.get("access_token") or ""
+        expire = int(res.get("expire_time") or 0)
+        now_ms = int(time.time() * 1000)
+        # expire_time may be seconds or milliseconds depending on env; normalize to ms
+        self._token_expire_ms = now_ms + (expire if expire > 1_000_000_000 else expire * 1000)
         return "ok"
 
     # ---- Device list for a linked app account (UID) ----
